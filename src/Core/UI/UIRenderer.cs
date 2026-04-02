@@ -389,7 +389,8 @@ namespace TerrariaModder.Core.UI
         private static bool _scissorInitialized;
         private static Rectangle _savedScissorRect;
         private static RasterizerState _savedRasterizerState;
-        private static Matrix _savedClipMatrix; // transform in use before BeginClip
+        private static Matrix _savedClipMatrix = Matrix.Identity; // transform in use before BeginClip
+        private static SamplerState _savedSamplerState; // sampler state in use before BeginClip
         private static bool _clipActive;
 
         /// <summary>
@@ -452,6 +453,12 @@ namespace TerrariaModder.Core.UI
                 // not the UI transform, causing all clipped content to be offset on menus and in-world.
                 _savedClipMatrix = GetCurrentSpriteBatchMatrix();
 
+                // Capture the current sampler state from the GraphicsDevice before ending the batch.
+                // Main.DefaultSamplerState may be LinearClamp (blurry), but Terraria's actual running
+                // batch may use PointClamp (crisp). We must restore whatever was in use, not use
+                // DefaultSamplerState, or all content drawn inside and after the clip will be blurry.
+                _savedSamplerState = _graphicsDevice.SamplerStates[0] ?? SamplerState.PointClamp;
+
                 // End current batch so we can restart with scissor rasterizer
                 if (_spriteBatchBeginCalled != null)
                 {
@@ -474,11 +481,11 @@ namespace TerrariaModder.Core.UI
                 // Set rasterizer state with scissor test enabled
                 _graphicsDevice.RasterizerState = _rasterizerStateScissor;
 
-                // Begin batch with scissor-enabled rasterizer, preserving the UI transform
+                // Begin batch with scissor-enabled rasterizer, preserving the UI transform and sampler state
                 _spriteBatch.Begin(
                     SpriteSortMode.Deferred,
                     BlendState.AlphaBlend,
-                    Main.DefaultSamplerState,
+                    _savedSamplerState,
                     DepthStencilState.None,
                     _rasterizerStateScissor,
                     null,
@@ -528,15 +535,18 @@ namespace TerrariaModder.Core.UI
                 if (_savedRasterizerState != null)
                     _graphicsDevice.RasterizerState = _savedRasterizerState;
 
-                // Restore batch with the same transform that was active before BeginClip
+                // Restore batch with the same transform and sampler state that were active before BeginClip.
+                // Use _savedSamplerState (captured from GraphicsDevice before BeginClip) instead of
+                // Main.DefaultSamplerState, which may be LinearClamp and would cause blurry rendering.
                 var rasterizer = Main.Rasterizer;
+                var sampler = _savedSamplerState ?? SamplerState.PointClamp;
                 bool restored = false;
                 if (rasterizer != null)
                 {
                     _spriteBatch.Begin(
                         SpriteSortMode.Deferred,
                         BlendState.AlphaBlend,
-                        Main.DefaultSamplerState,
+                        sampler,
                         DepthStencilState.None,
                         rasterizer,
                         null,
@@ -618,16 +628,31 @@ namespace TerrariaModder.Core.UI
                     return;
                 }
 
-                // Try simple Begin first (no arguments)
+                // Try Begin with proper sampler state (parameterless Begin defaults to LinearClamp → blurry text)
                 try
                 {
-                    _spriteBatch.Begin();
+                    _spriteBatch.Begin(
+                        SpriteSortMode.Deferred,
+                        BlendState.AlphaBlend,
+                        Main.DefaultSamplerState,
+                        DepthStencilState.None,
+                        null,
+                        null,
+                        _savedClipMatrix
+                    );
                     _weCalledBegin = true;
                     return;
                 }
                 catch
                 {
-                    // Simple Begin failed, try complex Begin
+                    // Full Begin failed, try parameterless as last resort
+                    try
+                    {
+                        _spriteBatch.Begin();
+                        _weCalledBegin = true;
+                        return;
+                    }
+                    catch { }
                 }
 
                 // Fall back to complex Begin
@@ -691,9 +716,22 @@ namespace TerrariaModder.Core.UI
         {
             try
             {
-                _spriteBatch?.Begin();
+                // Use the saved clip matrix and proper sampler state so text/items remain crisp.
+                // Parameterless Begin() defaults to LinearClamp which makes text blurry.
+                _spriteBatch?.Begin(
+                    SpriteSortMode.Deferred,
+                    BlendState.AlphaBlend,
+                    _savedSamplerState ?? SamplerState.PointClamp,
+                    DepthStencilState.None,
+                    null,
+                    null,
+                    _savedClipMatrix
+                );
             }
-            catch { }
+            catch
+            {
+                try { _spriteBatch?.Begin(); } catch { }
+            }
         }
 
         /// <summary>

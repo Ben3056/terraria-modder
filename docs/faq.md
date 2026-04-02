@@ -55,11 +55,25 @@ Yes. Since TerrariaModder launches through TerrariaInjector.exe alongside the re
 
 ### Does TerrariaModder work in multiplayer?
 
-TerrariaModder is designed primarily for singleplayer. Some mods work in multiplayer (client-side QoL mods like AutoBuffs, QuickKeys), but mods that modify game state (AdminPanel god mode, ItemSpawner) are singleplayer only. Each mod's documentation specifies multiplayer compatibility.
+Yes. TerrariaModder has full multiplayer support for both **Host & Play** and **Dedicated Server** modes. Features include an admin system, per-mod permission grants, server console commands, and config scoping ([Server] vs [Client] properties).
+
+Each mod declares its multiplayer compatibility in its manifest:
+- **required** — all connected players must have the mod installed
+- **optional** — server has it, clients can join without it (features degrade)
+- **client-only** — only affects your own game (e.g., FpsUnlocked, SkipIntro)
 
 ### Do other players need TerrariaModder installed?
 
-No. Client-side mods only affect your own game. Other players don't need anything installed and won't see your mods. The server sees standard Terraria network traffic.
+For **client-only** mods (SkipIntro, FpsUnlocked, AutoBuffs, QuickKeys), no — other players don't need anything. For mods marked **required** (especially those with custom items like StorageHub), all players need the mod installed at a compatible version. If a client is missing a required mod, they'll see a popup with the mod name and download link.
+
+### How do I become admin on a server?
+
+Three ways:
+1. **Host & Play** — the host is automatically admin
+2. **Localhost** — connecting from 127.0.0.1 grants auto-admin
+3. **Reqop key** — type `/reqop <key>` in chat (key is printed at server startup)
+
+Admins can promote others with `/op PlayerName` in the server console or the F6 Players tab.
 
 ## Installation
 

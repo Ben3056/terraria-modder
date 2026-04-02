@@ -70,6 +70,8 @@ namespace StorageHub.Patches
         {
             try
             {
+                if (Main.player == null || Main.myPlayer < 0 || Main.myPlayer >= Main.player.Length)
+                    return -1;
                 return Main.player[Main.myPlayer].chest;
             }
             catch

@@ -43,6 +43,15 @@ namespace StorageHub.Crafting
         }
 
         /// <summary>
+        /// Forward hotbar protection setting to the underlying executor.
+        /// </summary>
+        public bool ProtectHotbar
+        {
+            get => _executor?.ProtectHotbar ?? false;
+            set { if (_executor != null) _executor.ProtectHotbar = value; }
+        }
+
+        /// <summary>
         /// Calculate the crafting tree for a recipe.
         /// Returns ordered list of craft steps from raw materials to final product.
         /// </summary>

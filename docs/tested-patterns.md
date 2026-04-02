@@ -53,20 +53,7 @@ public static class PlayerUpdatePatch
 
 ### Applying Patches
 
-**Attribute-based patches** are auto-applied by the injector, no `PatchAll()` needed:
-
-```csharp
-// Just define the patch class. The injector applies it automatically.
-[HarmonyPatch(typeof(Terraria.Player), "Update")]
-public static class PlayerUpdatePatch
-{
-    [HarmonyPostfix]
-    public static void Postfix(Player __instance)
-    {
-        MyMod.OnUpdate(__instance);
-    }
-}
-```
+All patches must be applied **manually** using `_harmony.Patch()`. Attribute-based patches (`[HarmonyPatch]` attributes) are **not** auto-applied — they are only used in the Core framework itself. Mod patches must use the manual approach shown below.
 
 **Manual patches** use the `OnGameReady` lifecycle hook. The injector calls this when `Main.Initialize()` completes:
 

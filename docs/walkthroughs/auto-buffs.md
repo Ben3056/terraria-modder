@@ -211,9 +211,7 @@ public class Mod : IMod
 
     public static void OnGameReady()
     {
-        // Apply manual patches that need reflection to find methods.
-        // Attribute-based [HarmonyPatch] patches are auto-applied by the
-        // injector -- don't call PatchAll() for those or they'll double-apply.
+        // Apply patches manually. All mod patches use _harmony.Patch().
         _harmony = new Harmony("com.terrariamodder.autobuffs");
         var method = typeof(Terraria.Player).GetMethod("Update",
             BindingFlags.Public | BindingFlags.Instance);

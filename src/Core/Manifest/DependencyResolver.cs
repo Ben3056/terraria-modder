@@ -174,10 +174,23 @@ namespace TerrariaModder.Core.Manifest
                 // Filter to mods actually in the graph
                 var validOrder = order.Where(id => graph.ContainsKey(id)).ToList();
 
-                // Add edges: each mod in the list should load after the previous one
+                // Add edges: each mod in the list should load after the previous one.
+                // Skip edges that would conflict with existing dependency edges in the
+                // opposite direction, which would create cycles and cause mods to be dropped.
                 for (int i = 1; i < validOrder.Count; i++)
                 {
-                    graph[validOrder[i]].Add(validOrder[i - 1]);
+                    string later = validOrder[i];
+                    string earlier = validOrder[i - 1];
+
+                    // Check if the earlier mod already depends on the later mod (opposite direction).
+                    // Adding later->earlier would create a cycle.
+                    if (graph.ContainsKey(earlier) && graph[earlier].Contains(later))
+                    {
+                        _log.Warn($"User load order edge '{later}' after '{earlier}' conflicts with existing dependency ('{earlier}' depends on '{later}') — skipping");
+                        continue;
+                    }
+
+                    graph[later].Add(earlier);
                 }
 
                 _log.Info($"Applied user load order from load-order.json ({validOrder.Count} mods)");

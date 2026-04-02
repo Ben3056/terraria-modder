@@ -6,7 +6,6 @@ using StorageHub.Crafting;
 using StorageHub.Config;
 using StorageHub.Shared;
 using StorageHub.Storage;
-using TerrariaModder.Core.Config;
 using TerrariaModder.Core.UI.Widgets;
 
 namespace StorageHub.UI.Tabs
@@ -28,7 +27,7 @@ namespace StorageHub.UI.Tabs
         private readonly CraftabilityChecker _checker;
         private readonly RecursiveCrafter _crafter;
         private readonly StorageHubConfig _config;
-        private readonly IModConfig _modConfig;
+        private readonly StorageHubModConfig _modConfig;
         private CraftingExecutor _executor;
 
         // UI components
@@ -85,7 +84,7 @@ namespace StorageHub.UI.Tabs
         /// </summary>
         public Action OnStorageModified { get; set; }
 
-        public CraftTab(ILogger log, RecipeIndex recipeIndex, CraftabilityChecker checker, RecursiveCrafter crafter, StorageHubConfig config, IStorageProvider storage, IModConfig modConfig)
+        public CraftTab(ILogger log, RecipeIndex recipeIndex, CraftabilityChecker checker, RecursiveCrafter crafter, StorageHubConfig config, IStorageProvider storage, StorageHubModConfig modConfig)
         {
             _log = log;
             _recipeIndex = recipeIndex;
@@ -120,7 +119,7 @@ namespace StorageHub.UI.Tabs
             _recursivePlanComputed = true;
             _recursiveMaxCraftable = 0;
 
-            int depth = _modConfig.Get<int>("recursiveCraftingDepth", 0);
+            int depth = (_modConfig?.RecursiveCraftingDepth ?? 0);
             var plan = _crafter.CalculatePlan(recipeIdx, 1, depth);
             if (plan == null)
             {
@@ -517,7 +516,7 @@ namespace StorageHub.UI.Tabs
             // Check if recursive crafting can handle this recipe
             bool showCraftControls = result.Status == CraftStatus.Craftable;
             if (!showCraftControls && result.Status == CraftStatus.MissingMaterials
-                && _modConfig.Get<bool>("recursiveCrafting", true))
+                && (_modConfig?.RecursiveCrafting ?? true))
             {
                 EnsureRecursivePlan(result);
                 showCraftControls = _recursiveMaxCraftable > 0;
@@ -907,7 +906,7 @@ namespace StorageHub.UI.Tabs
                 return;
 
             var result = _filteredRecipes[_selectedRecipeIndex];
-            bool useRecursive = _modConfig.Get<bool>("recursiveCrafting", true);
+            bool useRecursive = (_modConfig?.RecursiveCrafting ?? true);
 
             // Must be directly craftable, or recursively craftable for MissingMaterials
             if (result.Status != CraftStatus.Craftable
@@ -919,13 +918,18 @@ namespace StorageHub.UI.Tabs
             int actualCount = Math.Min(_craftAmount, maxCraftable);
             if (actualCount <= 0) return;
 
+            // Apply hotbar protection setting to both executors (F6 toggle OR per-world config)
+            bool protectHotbar = (_modConfig?.BlockHotbarFromCrafting ?? false) || (_config?.HotbarProtection ?? false);
+            _executor.ProtectHotbar = protectHotbar;
+            _crafter.ProtectHotbar = protectHotbar;
+
             bool success;
             int totalOutput;
 
             if (useRecursive)
             {
                 // Use RecursiveCrafter to build and execute crafting plan
-                int depth = _modConfig.Get<int>("recursiveCraftingDepth", 0);
+                int depth = (_modConfig?.RecursiveCraftingDepth ?? 0);
                 var plan = _crafter.CalculatePlan(result.Recipe.OriginalIndex, actualCount, depth);
                 if (plan == null)
                 {
@@ -999,7 +1003,7 @@ namespace StorageHub.UI.Tabs
                 // Exclude recipes that are recursively craftable (those belong in the Craftable view)
                 var partial = _checker.GetPartialRecipes();
 
-                if (_modConfig.Get<bool>("recursiveCrafting", true))
+                if ((_modConfig?.RecursiveCrafting ?? true))
                 {
                     var recursiveSet = new HashSet<int>();
                     foreach (var r in GetRecursiveCandidates())
@@ -1013,7 +1017,7 @@ namespace StorageHub.UI.Tabs
             else
             {
                 // "Craftable" view: directly craftable + recursively craftable
-                if (_modConfig.Get<bool>("recursiveCrafting", true))
+                if ((_modConfig?.RecursiveCrafting ?? true))
                 {
                     var recursiveCandidates = GetRecursiveCandidates();
                     if (recursiveCandidates.Count > 0)
@@ -1042,7 +1046,7 @@ namespace StorageHub.UI.Tabs
             foreach (var r in _craftableRecipes)
                 existing.Add(r.Recipe.OriginalIndex);
 
-            int depth = _modConfig.Get<int>("recursiveCraftingDepth", 0);
+            int depth = (_modConfig?.RecursiveCraftingDepth ?? 0);
 
             foreach (var recipe in _recipeIndex.GetAllRecipes())
             {

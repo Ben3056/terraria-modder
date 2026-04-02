@@ -59,7 +59,7 @@ https://github.com/SixteenthBit/terraria-modder
 
 ## Multiplayer
 
-TerrariaModder is client-side only. Mods that only affect your own player (like keybinds, UI, and buffs) work fine in multiplayer. Mods that modify shared game state (chests, time, NPCs) are singleplayer only for now. Each mod's README notes its multiplayer status. Full multiplayer support is planned for a future update.
+TerrariaModder has full multiplayer support including Host & Play and Dedicated Server modes. Features include an admin system with `/op`, `/kick`, `/ban`, `/grant` commands, per-mod permission grants, config scoping (`[Server]` vs `[Client]` properties), and server-authoritative operations. Each mod's README notes its multiplayer compatibility (required, optional, or client-only).
 
 ## License
 

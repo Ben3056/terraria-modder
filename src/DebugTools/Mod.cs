@@ -2,10 +2,12 @@ using System;
 using TerrariaModder.Core;
 using TerrariaModder.Core.Debug;
 using TerrariaModder.Core.Logging;
+using TerrariaModder.Core.Net;
+using TerrariaModder.Core.Reflection;
 
 namespace DebugTools
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle
     {
         public string Id => "debug-tools";
         public string Name => "Debug Tools";
@@ -16,20 +18,34 @@ namespace DebugTools
         private DebugHttpServer _httpServer;
         private ConsoleUI _console;
         private bool _httpEnabled;
+        private bool _serverMode;
 
         public void Initialize(ModContext context)
         {
             _log = context.Logger;
             _instance = this;
 
-            if (!context.Config.Get<bool>("enabled", true))
+            var config = context.GetConfig<DebugToolsConfig>();
+            if (config != null && !config.Enabled)
             {
                 _log.Info("Debug Tools disabled in config");
                 return;
             }
 
-            _httpEnabled = context.Config.Get("httpServer", true);
-            bool startHidden = context.Config.Get("startHidden", false);
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _serverMode = true;
+                RegisterNetCommands();
+                _log.Info("Debug Tools: dedicated server mode — UI and HTTP skipped");
+                return;
+            }
+
+            _httpEnabled = config != null ? config.HttpServer : true;
+            int httpPort = config != null ? config.HttpPort : 7878;
+            bool startHidden = config != null ? config.StartHidden : false;
+
+            // Initialize main-thread dispatcher (captures thread ID for IsMainThread check)
+            MainThreadDispatcher.Initialize();
 
             // Initialize window manager (grabs console handle, hides if startHidden)
             WindowManager.Initialize(_log, startHidden);
@@ -46,13 +62,14 @@ namespace DebugTools
 
             // Register menu navigation commands (backward-compatible names)
             RegisterMenuCommands();
+            RegisterNetCommands();
 
             // Start HTTP server
             if (_httpEnabled)
             {
                 try
                 {
-                    _httpServer = new DebugHttpServer(_log);
+                    _httpServer = new DebugHttpServer(_log, httpPort);
                     _httpServer.Start();
                 }
                 catch (Exception ex)
@@ -74,7 +91,7 @@ namespace DebugTools
         public static void OnGameReady()
         {
             var inst = _instance;
-            if (inst == null) return;
+            if (inst == null || inst._serverMode) return;
 
             try
             {
@@ -95,10 +112,14 @@ namespace DebugTools
             }
         }
 
+        public void OnContentReady(ModContext context) { }
+
         public void OnWorldLoad() { }
 
         public void OnWorldUnload()
         {
+            if (_serverMode) return;
+
             try
             {
                 VirtualInputManager.ReleaseAll();
@@ -113,6 +134,13 @@ namespace DebugTools
 
         public void Unload()
         {
+            if (_serverMode)
+            {
+                _instance = null;
+                _log?.Info("Debug Tools unloaded (server mode)");
+                return;
+            }
+
             // Release virtual input
             try
             {
@@ -203,6 +231,42 @@ namespace DebugTools
                 CommandRegistry.Write($"Entering world: character={charIdx}, world={worldIdx}...");
                 var result = menuNav.EnterWorld(charIdx, worldIdx);
                 CommandRegistry.Write(result.Success ? $"OK: {result.Message}" : $"FAIL: {result.Message}");
+            });
+        }
+
+        private void RegisterNetCommands()
+        {
+            CommandRegistry.Register("net-ping", "M1 round-trip probe. Server: net-ping [clientIndex]. Client: net-ping", args =>
+            {
+                try
+                {
+                    bool isDedServ = Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1";
+                    bool isMultiplayer = isDedServ || Game.IsMultiplayer;
+
+                    if (!isMultiplayer)
+                    {
+                        CommandRegistry.Write("Not in multiplayer (netMode=0)");
+                        return;
+                    }
+
+                    if (isDedServ || Game.IsServer)
+                    {
+                        int target = 0;
+                        if (args.Length > 0 && int.TryParse(args[0], out int t))
+                            target = t;
+                        CommandRegistry.Write($"[Server] Sending ping to client {target}...");
+                        NetSync.SendPingToClient(target);
+                    }
+                    else
+                    {
+                        CommandRegistry.Write("[Client] Sending ping to server...");
+                        NetSync.SendPingToServer();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CommandRegistry.Write($"[net-ping] Error: {ex.Message}");
+                }
             });
         }
     }

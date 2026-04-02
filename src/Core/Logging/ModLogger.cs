@@ -45,8 +45,11 @@ namespace TerrariaModder.Core.Logging
             string formatted = $"[{timestamp}] [{levelStr}] [{ModId}] {message}";
 
             // Console write is best-effort - must not prevent file/buffer writes
-            try { WriteToConsole(level, formatted); }
-            catch { }
+            if (!LogManager.SuppressConsole)
+            {
+                try { WriteToConsole(level, formatted); }
+                catch { }
+            }
 
             LogManager.WriteToSharedFile(formatted);
             LogManager.AddRecentLog(ModId, level, message);

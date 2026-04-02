@@ -45,10 +45,13 @@ namespace TerrariaModder.Core.Assets
                 int patchCount = 0;
                 patchCount += PatchSort();
                 patchCount += PatchGetSortingLayerIndex();
+                patchCount += PatchSetupWhiteLists();
+                patchCount += PatchQuickStackAllChests();
                 ResizeQuickStackArray();
+                ResizeSortingLayerIndexArray();
 
                 _applied = true;
-                _log?.Info($"[ItemProtectionPatches] Applied {patchCount} patches + array resize");
+                _log?.Info($"[ItemProtectionPatches] Applied {patchCount} patches + array resizes");
             }
             catch (Exception ex)
             {
@@ -216,7 +219,138 @@ namespace TerrariaModder.Core.Assets
             return true;
         }
 
-        // ── 3. Resize QuickStacking firstEntryForType array ──
+        // ── 3. Postfix on SetupWhiteLists to re-resize _layerIndexForItemType ──
+        // SetupWhiteLists() re-creates _layerIndexForItemType at vanilla size (ItemID.Count).
+        // This runs after our initial resize, undoing it. Postfix re-resizes every time.
+
+        private static int PatchSetupWhiteLists()
+        {
+            try
+            {
+                var sortingType = typeof(Main).Assembly.GetType("Terraria.UI.ItemSorting");
+                if (sortingType == null) return 0;
+
+                var method = sortingType.GetMethod("SetupWhiteLists",
+                    BindingFlags.Public | BindingFlags.Static);
+
+                if (method == null)
+                {
+                    _log?.Warn("[ItemProtectionPatches] SetupWhiteLists not found");
+                    return 0;
+                }
+
+                _harmony.Patch(method,
+                    postfix: new HarmonyMethod(typeof(ItemProtectionPatches), nameof(SetupWhiteLists_Postfix)));
+
+                _log?.Debug("[ItemProtectionPatches] Patched SetupWhiteLists");
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                _log?.Warn($"[ItemProtectionPatches] SetupWhiteLists patch failed: {ex.Message}");
+                return 0;
+            }
+        }
+
+        private static void SetupWhiteLists_Postfix()
+        {
+            // Re-resize _layerIndexForItemType after vanilla rebuilds it
+            ResizeSortingLayerIndexArray();
+        }
+
+        // ── 4. QuickStack protection ──
+        // Extract custom items before QuickStack to prevent any IndexOutOfRange
+        // in vanilla code that may access ItemID.Sets or other fixed-size arrays.
+
+        [ThreadStatic]
+        private static List<(int slot, Item item)> _quickStackStash;
+
+        private static int PatchQuickStackAllChests()
+        {
+            try
+            {
+                var method = typeof(Player).GetMethod("QuickStackAllChests",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (method == null)
+                {
+                    _log?.Warn("[ItemProtectionPatches] QuickStackAllChests not found");
+                    return 0;
+                }
+
+                _harmony.Patch(method,
+                    prefix: new HarmonyMethod(typeof(ItemProtectionPatches), nameof(QuickStackAllChests_Prefix)),
+                    postfix: new HarmonyMethod(typeof(ItemProtectionPatches), nameof(QuickStackAllChests_Postfix)));
+
+                _log?.Debug("[ItemProtectionPatches] Patched QuickStackAllChests");
+                return 1;
+            }
+            catch (Exception ex)
+            {
+                _log?.Warn($"[ItemProtectionPatches] QuickStackAllChests patch failed: {ex.Message}");
+                return 0;
+            }
+        }
+
+        private static void QuickStackAllChests_Prefix(Player __instance)
+        {
+            _quickStackStash = null;
+            if (__instance?.inventory == null) return;
+
+            var inv = __instance.inventory;
+            for (int i = 10; i < 50; i++) // slots 10-49 (skip hotbar 0-9)
+            {
+                var item = inv[i];
+                if (item == null || item.IsAir || item.type < ItemRegistry.VanillaItemCount) continue;
+
+                if (_quickStackStash == null)
+                    _quickStackStash = new List<(int, Item)>();
+
+                _quickStackStash.Add((i, item.Clone()));
+                inv[i] = new Item();
+            }
+
+            if (_quickStackStash != null)
+                _log?.Debug($"[ItemProtectionPatches] QuickStack: extracted {_quickStackStash.Count} custom items");
+        }
+
+        private static void QuickStackAllChests_Postfix(Player __instance)
+        {
+            if (_quickStackStash == null || __instance?.inventory == null) return;
+
+            var inv = __instance.inventory;
+            int restored = 0;
+            foreach (var (slot, item) in _quickStackStash)
+            {
+                if (inv[slot] == null || inv[slot].IsAir)
+                {
+                    inv[slot] = item;
+                    restored++;
+                }
+                else
+                {
+                    // Slot was filled by QuickStack, find another empty slot
+                    bool placed = false;
+                    for (int i = 10; i < 50; i++)
+                    {
+                        if (inv[i] == null || inv[i].IsAir)
+                        {
+                            inv[i] = item;
+                            restored++;
+                            placed = true;
+                            break;
+                        }
+                    }
+                    if (!placed)
+                        _log?.Warn($"[ItemProtectionPatches] QuickStack: no slot for custom item type {item.type}");
+                }
+            }
+
+            _log?.Debug($"[ItemProtectionPatches] QuickStack: restored {restored}/{_quickStackStash.Count} custom items");
+            _quickStackStash = null;
+        }
+
+        // ── 5. Resize QuickStacking.firstEntryForType array ──
 
         private static void ResizeQuickStackArray()
         {
@@ -267,7 +401,8 @@ namespace TerrariaModder.Core.Assets
                     return;
                 }
 
-                int needed = ItemRegistry.VanillaItemCount + ItemRegistry.Count + 64;
+                // Use ExtendedCount to cover hash-derived type IDs which can be anywhere in [VanillaItemCount, 32767)
+                int needed = TypeExtension.ExtendedCount > 0 ? TypeExtension.ExtendedCount : ItemRegistry.VanillaItemCount + ItemRegistry.Count + 64;
                 if (currentArray.Length >= needed)
                 {
                     _log?.Debug($"[ItemProtectionPatches] firstEntryForType already large enough ({currentArray.Length} >= {needed})");
@@ -283,6 +418,58 @@ namespace TerrariaModder.Core.Assets
             catch (Exception ex)
             {
                 _log?.Warn($"[ItemProtectionPatches] firstEntryForType resize failed: {ex.Message}");
+            }
+        }
+
+        // ── 6. Resize ItemSorting._layerIndexForItemType array ──
+        // GetSortingLayerIndex directly indexes _layerIndexForItemType[itemType].
+        // The prefix patch prevents OOB for custom types, but if the prefix fails
+        // to fire (e.g. inlining), this resize provides a safety net.
+        // Also prevents OOB in sorting lambdas that access ItemID.Sets arrays
+        // via item.type bounds checks against ItemID.Count.
+
+        private static void ResizeSortingLayerIndexArray()
+        {
+            try
+            {
+                var sortingType = typeof(Main).Assembly.GetType("Terraria.UI.ItemSorting");
+                if (sortingType == null)
+                {
+                    _log?.Debug("[ItemProtectionPatches] ItemSorting type not found");
+                    return;
+                }
+
+                var field = sortingType.GetField("_layerIndexForItemType",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                if (field == null)
+                {
+                    _log?.Debug("[ItemProtectionPatches] _layerIndexForItemType field not found");
+                    return;
+                }
+
+                var currentArray = field.GetValue(null) as int[];
+                if (currentArray == null)
+                {
+                    _log?.Debug("[ItemProtectionPatches] _layerIndexForItemType is null");
+                    return;
+                }
+
+                int needed = TypeExtension.ExtendedCount > 0 ? TypeExtension.ExtendedCount : ItemRegistry.VanillaItemCount + ItemRegistry.Count + 64;
+                if (currentArray.Length >= needed)
+                {
+                    _log?.Debug($"[ItemProtectionPatches] _layerIndexForItemType already large enough ({currentArray.Length} >= {needed})");
+                    return;
+                }
+
+                var newArray = new int[needed];
+                Array.Copy(currentArray, newArray, currentArray.Length);
+                field.SetValue(null, newArray);
+
+                _log?.Info($"[ItemProtectionPatches] Resized _layerIndexForItemType: {currentArray.Length} → {needed}");
+            }
+            catch (Exception ex)
+            {
+                _log?.Warn($"[ItemProtectionPatches] _layerIndexForItemType resize failed: {ex.Message}");
             }
         }
     }

@@ -31,6 +31,17 @@ namespace TerrariaModder.Core.Assets
         private static readonly Dictionary<int, string> _typeToId = new Dictionary<int, string>();
         private static readonly Dictionary<int, ItemDefinition> _typeToDefinition = new Dictionary<int, ItemDefinition>();
 
+        // Alias → current fullId (built from ItemDefinition.Aliases in AssignRuntimeTypes)
+        private static readonly Dictionary<string, string> _aliasToCurrentId
+            = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // KnownUnknown types: type IDs for Optional mods the client doesn't have locally.
+        // Populated from TypeIdManifest packet on join, cleared on disconnect.
+        private static readonly Dictionary<int, string> _knownUnknowns = new Dictionary<int, string>();
+        // Reverse lookup: fullId → typeId, for resolving server-sent item IDs to KnownUnknown types.
+        private static readonly Dictionary<string, int> _knownUnknownsByFullId
+            = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>First vanilla item count (before extension). Custom types start here.</summary>
         public static int VanillaItemCount { get; private set; }
 
@@ -106,6 +117,13 @@ namespace TerrariaModder.Core.Assets
         /// <summary>
         /// Assign deterministic runtime type IDs to all registered items.
         /// Called once after all mods have loaded.
+        ///
+        /// IDs are hash-derived (FNV-1a of the full item key) rather than sequential.
+        /// This makes each item's ID independent of what other items are registered, so
+        /// host and client agree on type numbers even when they have different mod subsets.
+        ///
+        /// Valid range: [VanillaItemCount, 32767) — arrays were extended to 32767 by TypeExtension.
+        /// Collisions are extremely unlikely but handled via linear probing with a warning log.
         /// </summary>
         public static void AssignRuntimeTypes()
         {
@@ -121,35 +139,89 @@ namespace TerrariaModder.Core.Assets
             _typeToId.Clear();
             _typeToDefinition.Clear();
 
-            // Sort all IDs alphabetically for deterministic assignment
-            var sortedIds = _definitions.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+            // Extended array upper bound (exclusive). TypeExtension defaults to 32767.
+            // Valid indices: 0..32766, so custom items live in [VanillaItemCount, 32767).
+            const int MaxType = 32767;
+            int assignedCount = 0;
+            int probeSteps = 0;
+            int collidedItems = 0;
 
-            for (int i = 0; i < sortedIds.Count; i++)
+            foreach (string fullId in _definitions.Keys)
             {
-                int runtimeType = VanillaItemCount + i;
-                string fullId = sortedIds[i];
+                uint rawHash = FNV1a.Hash(fullId);
+                int intended = FNV1a.ToRange(rawHash, VanillaItemCount, MaxType);
+                int candidate = intended;
 
-                _idToType[fullId] = runtimeType;
-                _typeToId[runtimeType] = fullId;
-                _typeToDefinition[runtimeType] = _definitions[fullId];
+                // Resolve collisions: linear probe until a free slot is found
+                while (_typeToId.ContainsKey(candidate))
+                {
+                    candidate++;
+                    if (candidate >= MaxType) candidate = VanillaItemCount; // wrap
+                    if (candidate == intended)
+                    {
+                        _log?.Error($"[ItemRegistry] No free type slot for {fullId} — custom item range exhausted");
+                        candidate = -1;
+                        break;
+                    }
+                    probeSteps++;
+                }
+
+                if (candidate < 0) continue;
+
+                if (candidate != intended)
+                {
+                    collidedItems++;
+                    // Name both conflicting items so the mod author knows what to rename
+                    string incumbent = _typeToId.TryGetValue(intended, out var inc) ? inc : "(unknown)";
+                    _log?.Warn($"[ItemRegistry] Hash collision: \"{incumbent}\" and \"{fullId}\" both targeted slot {intended} — \"{fullId}\" probe-resolved to {candidate}. Rename one item key to eliminate this.");
+                }
+
+                _idToType[fullId] = candidate;
+                _typeToId[candidate] = fullId;
+                _typeToDefinition[candidate] = _definitions[fullId];
+                assignedCount++;
             }
 
             TypesAssigned = true;
-            _log?.Info($"[ItemRegistry] Assigned {sortedIds.Count} runtime types ({VanillaItemCount} - {VanillaItemCount + sortedIds.Count - 1})");
+            _log?.Info($"[ItemRegistry] Assigned {assignedCount} runtime types via FNV-1a hash in [{VanillaItemCount}, {MaxType})");
+            if (collidedItems > 0)
+                _log?.Warn($"[ItemRegistry] {collidedItems} hash collision(s) detected ({probeSteps} probe step(s)) — see above for details. Rename conflicting item keys to eliminate.");
 
-            // Log all assignments at Debug level
-            foreach (var id in sortedIds)
+            foreach (var kvp in _idToType)
+                _log?.Debug($"[ItemRegistry]   {kvp.Key} → type {kvp.Value}");
+
+            // Build alias reverse map: old fullId → current fullId
+            _aliasToCurrentId.Clear();
+            foreach (var kvp in _definitions)
             {
-                _log?.Debug($"[ItemRegistry]   {id} → type {_idToType[id]}");
+                var def = kvp.Value;
+                if (def.Aliases == null || def.Aliases.Count == 0) continue;
+                foreach (string alias in def.Aliases)
+                {
+                    if (string.IsNullOrEmpty(alias)) continue;
+                    if (_aliasToCurrentId.ContainsKey(alias))
+                        _log?.Warn($"[ItemRegistry] Duplicate alias \"{alias}\" — already mapped to \"{_aliasToCurrentId[alias]}\", ignoring second registration for \"{kvp.Key}\"");
+                    else
+                        _aliasToCurrentId[alias] = kvp.Key;
+                }
             }
+            if (_aliasToCurrentId.Count > 0)
+                _log?.Info($"[ItemRegistry] Built alias map: {_aliasToCurrentId.Count} alias(es)");
         }
 
         // ── Lookups ──
 
-        /// <summary>Get runtime type for a full item ID. Returns -1 if not found.</summary>
+        /// <summary>
+        /// Get runtime type for a full item ID. Returns -1 if not found.
+        /// If the canonical name fails, automatically checks the alias map (handles renamed items).
+        /// </summary>
         public static int GetRuntimeType(string fullId)
         {
-            return _idToType.TryGetValue(fullId, out int type) ? type : -1;
+            if (_idToType.TryGetValue(fullId, out int type)) return type;
+            // Check alias map — item may have been renamed
+            if (_aliasToCurrentId.TryGetValue(fullId, out string currentId))
+                return _idToType.TryGetValue(currentId, out type) ? type : -1;
+            return -1;
         }
 
         /// <summary>Get full item ID for a runtime type. Returns null if not found.</summary>
@@ -172,6 +244,10 @@ namespace TerrariaModder.Core.Assets
 
         /// <summary>Check if a runtime type is a custom item.</summary>
         public static bool IsCustomItem(int type) => type >= VanillaItemCount && _typeToId.ContainsKey(type);
+
+        /// <summary>Returns true if the given mod has registered any custom items.</summary>
+        public static bool HasCustomItems(string modId) =>
+            !string.IsNullOrEmpty(modId) && _modItems.ContainsKey(modId);
 
         /// <summary>Get mod folder path for texture loading.</summary>
         public static string GetModFolder(string modId)
@@ -252,8 +328,70 @@ namespace TerrariaModder.Core.Assets
             _idToType.Clear();
             _typeToId.Clear();
             _typeToDefinition.Clear();
+            _aliasToCurrentId.Clear();
+            _knownUnknowns.Clear();
+            _knownUnknownsByFullId.Clear();
             TypesAssigned = false;
             _vanillaNameCache = null;
+        }
+
+        // ── KnownUnknowns (Phase I: heterogeneous mod sets) ──
+
+        /// <summary>
+        /// Register a type ID known to the server but not locally installed.
+        /// Called when receiving TypeIdManifest packet from server.
+        /// </summary>
+        public static void AddKnownUnknown(int typeId, string fullId)
+        {
+            if (typeId < VanillaItemCount) return; // sanity: never replace vanilla
+            if (IsCustomItem(typeId)) return;       // already known locally, skip
+            _knownUnknowns[typeId] = fullId;
+            if (!string.IsNullOrEmpty(fullId))
+                _knownUnknownsByFullId[fullId] = typeId;
+        }
+
+        /// <summary>
+        /// Reverse lookup: returns the KnownUnknown type ID for a given full item ID, or -1 if not found.
+        /// Used to resolve server-sent item IDs (e.g. in CustomItemSync) to KnownUnknown type IDs.
+        /// </summary>
+        public static int GetKnownUnknownType(string fullId)
+        {
+            if (string.IsNullOrEmpty(fullId)) return -1;
+            return _knownUnknownsByFullId.TryGetValue(fullId, out int typeId) ? typeId : -1;
+        }
+
+        /// <summary>
+        /// Returns true if the type is a server-known Optional mod item the client doesn't have.
+        /// </summary>
+        public static bool IsKnownUnknown(int type, out string fullId)
+        {
+            return _knownUnknowns.TryGetValue(type, out fullId);
+        }
+
+        /// <summary>
+        /// Clear all KnownUnknown entries. Called on disconnect.
+        /// </summary>
+        public static void ClearKnownUnknowns()
+        {
+            int count = _knownUnknowns.Count;
+            _knownUnknowns.Clear();
+            _knownUnknownsByFullId.Clear();
+            if (count > 0)
+                _log?.Info($"[ItemRegistry] Cleared {count} KnownUnknown type(s) on disconnect");
+        }
+
+        // ── IContentRegistry adapter ──
+
+        /// <summary>
+        /// IContentRegistry adapter wrapping the static ItemRegistry.
+        /// Registered with ContentRegistry so the coordinator can call AssignRuntimeTypes()
+        /// without knowing about ItemRegistry specifically.
+        /// </summary>
+        internal sealed class Adapter : IContentRegistry
+        {
+            void IContentRegistry.AssignRuntimeTypes() => ItemRegistry.AssignRuntimeTypes();
+            int IContentRegistry.Count => ItemRegistry.Count;
+            bool IContentRegistry.HasCustomContent(string modId) => ItemRegistry.HasCustomItems(modId);
         }
     }
 }

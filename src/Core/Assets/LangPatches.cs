@@ -26,6 +26,9 @@ namespace TerrariaModder.Core.Assets
         private static Array _tooltipCache;
         private static bool _nameTraceLogged;
 
+        /// <summary>Clear cached array refs so they're re-fetched after TypeExtension resizes them.</summary>
+        public static void InvalidateCaches() { _nameCache = null; _tooltipCache = null; }
+
         public static void Initialize(ILogger logger)
         {
             _log = logger;
@@ -111,6 +114,25 @@ namespace TerrariaModder.Core.Assets
         private static bool GetItemName_Prefix(int id, ref object __result)
         {
             if (id < ItemRegistry.VanillaItemCount) return true; // vanilla handles it
+
+            // I4: KnownUnknown — return bracket name directly
+            if (ItemRegistry.IsKnownUnknown(id, out string knownFullId))
+            {
+                // Create a LocalizedText with the bracket name
+                try
+                {
+                    var localizedTextType = typeof(Terraria.Localization.LocalizedText);
+                    var ctor = localizedTextType.GetConstructor(
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null,
+                        new[] { typeof(string), typeof(string) }, null);
+                    if (ctor != null)
+                    {
+                        __result = ctor.Invoke(new object[] { $"ItemName.Unknown_{id}", $"[{knownFullId}]" });
+                        return false;
+                    }
+                }
+                catch { }
+            }
 
             // Re-fetch cache ref if stale (can happen if Lang re-initializes)
             if (_nameCache == null)

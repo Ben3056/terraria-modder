@@ -42,12 +42,22 @@ namespace TerrariaModder.Core.Assets
         public static void RegisterDrop(DropDefinition drop)
         {
             if (drop == null) return;
-            if (!_drops.TryGetValue(drop.NpcType, out var list))
+            // Register for NpcType and any additional NpcTypes
+            var npcIds = new List<int>();
+            if (drop.NpcType != 0) npcIds.Add(drop.NpcType);
+            if (drop.NpcTypes != null)
+                foreach (int id in drop.NpcTypes)
+                    if (id != 0 && !npcIds.Contains(id)) npcIds.Add(id);
+
+            foreach (int npcId in npcIds)
             {
-                list = new List<DropDefinition>();
-                _drops[drop.NpcType] = list;
+                if (!_drops.TryGetValue(npcId, out var list))
+                {
+                    list = new List<DropDefinition>();
+                    _drops[npcId] = list;
+                }
+                list.Add(drop);
             }
-            list.Add(drop);
         }
 
         /// <summary>
@@ -126,6 +136,20 @@ namespace TerrariaModder.Core.Assets
 
                 foreach (var drop in drops)
                 {
+                    // Check conditions (J2)
+                    if (drop.Conditions != DropConditions.Always)
+                    {
+                        // Difficulty flags (Expert/Master) use OR: any matching flag satisfies
+                        var diffFlags = drop.Conditions & (DropConditions.ExpertMode | DropConditions.MasterMode);
+                        if (diffFlags != 0)
+                        {
+                            bool diffMet = ((diffFlags & DropConditions.ExpertMode) != 0 && Main.expertMode)
+                                        || ((diffFlags & DropConditions.MasterMode) != 0 && Main.masterMode);
+                            if (!diffMet) continue;
+                        }
+                        if ((drop.Conditions & DropConditions.HardMode) != 0 && !Main.hardMode) continue;
+                    }
+
                     // Roll chance
                     if (drop.Chance < 1.0f)
                     {
@@ -281,6 +305,9 @@ namespace TerrariaModder.Core.Assets
 
                 foreach (var shopItem in items)
                 {
+                    // Check shop condition (J4)
+                    if (!IsShopConditionMet(shopItem.Condition)) continue;
+
                     int itemType = ItemRegistry.ResolveItemType(shopItem.ItemId);
                     if (itemType < 0) continue;
 
@@ -315,6 +342,33 @@ namespace TerrariaModder.Core.Assets
             catch (Exception ex)
             {
                 _log?.Debug($"[ContentPatches] SetupShop error for NPC {type}: {ex.Message}");
+            }
+        }
+
+        private static bool IsShopConditionMet(ShopCondition condition)
+        {
+            switch (condition)
+            {
+                case ShopCondition.Always: return true;
+                case ShopCondition.HardMode: return Main.hardMode;
+                case ShopCondition.PostWallOfFlesh: return Main.hardMode;
+                case ShopCondition.PostMoonLord:
+                    return NPC.downedMoonlord;
+                case ShopCondition.PostGolem:
+                    return NPC.downedGolemBoss;
+                case ShopCondition.PostPlantera:
+                    return NPC.downedPlantBoss;
+                case ShopCondition.PostAllMechBosses:
+                    return NPC.downedMechBoss1 && NPC.downedMechBoss2 && NPC.downedMechBoss3;
+                case ShopCondition.PostMechBoss:
+                    return NPC.downedMechBoss1 || NPC.downedMechBoss2 || NPC.downedMechBoss3;
+                case ShopCondition.PostEvilBoss:
+                    return NPC.downedBoss2;
+                case ShopCondition.PostSkeletron:
+                    return NPC.downedBoss3;
+                case ShopCondition.PostEyeOfCthulhu:
+                    return NPC.downedBoss1;
+                default: return true;
             }
         }
 

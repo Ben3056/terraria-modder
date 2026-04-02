@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using Terraria;
 
@@ -17,7 +18,11 @@ namespace Randomizer.Modules
         public override bool IsWorldGen => true;
 
         internal static StartingItemsModule Instance;
-        private bool _appliedThisWorld;
+
+        // Track which worlds have received starting items this session (by worldID).
+        // Persists across world re-entries so we don't overwrite inventory on re-entry,
+        // but resets on new world creation (different worldID).
+        private static readonly HashSet<int> _worldsGivenItems = new HashSet<int>();
 
         // All IDs verified against _REFERENCE_SOURCE_READ_ONLY/.../ID/ItemID.cs
         private static readonly int[] StartingPool = {
@@ -52,16 +57,25 @@ namespace Randomizer.Modules
         public override void BuildShuffleMap()
         {
             Instance = this;
-            _appliedThisWorld = false;
 
-            // Apply random starting items
-            ApplyStartingItems();
+            // Only apply starting items once per world (tracked by worldID).
+            // Re-entering the same world will NOT overwrite the player's inventory.
+            int worldId = Main.worldID;
+            if (worldId != 0 && !_worldsGivenItems.Contains(worldId))
+                ApplyStartingItems(worldId);
         }
 
-        private void ApplyStartingItems()
+        /// <summary>Called on world unload. No longer resets the per-world tracking —
+        /// items should not be re-given when re-entering the same world.</summary>
+        internal void ResetForNewWorld()
         {
-            if (_appliedThisWorld) return;
-            _appliedThisWorld = true;
+            // Intentionally does not clear _worldsGivenItems — we want to remember
+            // which worlds already received items this session.
+        }
+
+        private void ApplyStartingItems(int worldId)
+        {
+            _worldsGivenItems.Add(worldId);
 
             try
             {

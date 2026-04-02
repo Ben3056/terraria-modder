@@ -210,7 +210,7 @@ namespace Randomizer.UI
             }
             else
             {
-                newSeed = text.GetHashCode();
+                newSeed = RandomizerPanel.DeterministicHash(text);
                 if (newSeed == 0) newSeed = 1;
             }
 

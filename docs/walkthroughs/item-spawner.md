@@ -10,7 +10,7 @@ nav_order: 5
 **Difficulty:** Advanced
 **Concepts:** Custom UI, item catalog, search, scrolling, spawning items
 
-ItemSpawner provides a searchable UI to spawn any item in the game (singleplayer only).
+ItemSpawner provides a searchable UI to spawn any item in the game. In multiplayer, requires admin or a per-mod grant (`/grant PlayerName item-spawner true`).
 
 ## What It Does
 

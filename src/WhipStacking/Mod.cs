@@ -9,7 +9,7 @@ using TerrariaModder.Core.Logging;
 
 namespace WhipStacking
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle
     {
         public string Id => "whip-stacking";
         public string Name => "Whip Stacking";
@@ -19,6 +19,7 @@ namespace WhipStacking
         private static ModContext _context;
         private static Harmony _harmony;
         private static Timer _patchTimer;
+        private static WhipStackingConfig _config;
 
         internal static bool Enabled = true;
 
@@ -26,6 +27,7 @@ namespace WhipStacking
         {
             _context = context;
             _log = context.Logger;
+            _config = context.GetConfig<WhipStackingConfig>();
             LoadConfig();
 
             _harmony = new Harmony("com.terrariamodder.whipstacking");
@@ -105,7 +107,7 @@ namespace WhipStacking
 
         private void LoadConfig()
         {
-            Enabled = _context.Config.Get("enabled", true);
+            Enabled = _config != null ? _config.Enabled : true;
             TagPatches.Enabled = Enabled;
         }
 
@@ -115,6 +117,8 @@ namespace WhipStacking
             MultiTagState.Reset(); // clear stale timers when toggling enabled/disabled
             _log.Info($"Config reloaded - Enabled: {Enabled}");
         }
+
+        public void OnContentReady(ModContext context) { }
 
         public void OnWorldLoad()
         {

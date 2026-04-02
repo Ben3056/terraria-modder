@@ -30,11 +30,13 @@ A GUI mod manager app is coming soon.
 | ItemSpawner | In-game item spawner | Insert | [Nexus](https://www.nexusmods.com/terraria/mods/141) |
 | AutoBuffs | Automatically applies furniture buffs | (auto) | [Nexus](https://www.nexusmods.com/terraria/mods/138) |
 | PetChests | Use pets as portable piggy banks | (right-click) | [Nexus](https://www.nexusmods.com/terraria/mods/142) |
-| StorageHub | Unified storage with crafting, recipes, shimmer decraft, painting chest, relay network | F5 | [Nexus](https://www.nexusmods.com/terraria/mods/136) |
+| StorageHub | Unified storage with crafting, recipes, shimmer decraft, mysterious chest, relay network | F5 | [Nexus](https://www.nexusmods.com/terraria/mods/136) |
 | AdminPanel | God mode, movement speed, teleports, time controls, respawn | Backslash, F9 | [Nexus](https://www.nexusmods.com/terraria/mods/137) |
 | WhipStacking | Restores pre-1.4.5 whip tag stacking | (auto) | [Nexus](https://www.nexusmods.com/terraria/mods/139) |
 | SeedLab | Toggle secret seed features for world gen (WIP) | F10 | [Nexus](https://www.nexusmods.com/terraria/mods/144) |
-| FpsUnlocked | Unlock frame rate with smooth interpolation | (auto) | [Nexus](https://www.nexusmods.com/terraria/mods/147) |
+| FpsUnlocked | Unlock frame rate with smooth interpolation | (auto) | [Nexus](https://www.nexusmods.com/terraria/mods/145) |
+| BiomeSpread | Visualize and control evil biome spread | (auto) | [Nexus](https://www.nexusmods.com/terraria/mods/146) |
+| Randomizer | Modular randomizer with seed system — shuffle chests, drops, recipes, shops, and more | Numpad / | [Nexus](https://www.nexusmods.com/terraria/mods/147) |
 
 **Optional (for mod developers):**
 
@@ -44,7 +46,15 @@ A GUI mod manager app is coming soon.
 
 ## Multiplayer
 
-TerrariaModder is client-side only. Mods that only affect your own player (like keybinds, UI, and buffs) work fine in multiplayer. Mods that modify shared game state (chests, time, NPCs) are singleplayer only for now. Each mod page notes its multiplayer status. Full multiplayer support is planned for a future update.
+TerrariaModder has full multiplayer support:
+
+- **Host & Play** — host from your game client, automatic admin for the host
+- **Dedicated Server** — headless server with HTTP management API and console commands
+- **Admin System** — promote/demote players, per-mod access grants, ban/kick
+- **Server Console** — `/op`, `/kick`, `/ban`, `/grant`, `/time`, `/config`, and more
+- **Config Scoping** — `[Server]` properties sync across all players, `[Client]` stays local
+
+Each mod's page notes its multiplayer compatibility (required, optional, or client-only). Mods with custom items are automatically required for all connected clients.
 
 ## Building from Source
 

@@ -1,9 +1,29 @@
 using TerrariaModder.Core;
+using TerrariaModder.Core.Config;
 using TerrariaModder.Core.Events;
 using TerrariaModder.Core.Logging;
 
 namespace ModTemplate
 {
+    /// <summary>
+    /// Mod configuration. Subclass ModConfig and declare typed properties with attributes.
+    /// The framework generates the settings UI automatically from this class.
+    /// Config is stored in TerrariaModder/core/configs/my-mod.client.json.
+    /// </summary>
+    public class MyModConfig : ModConfig
+    {
+        public override int Version => 1;
+
+        [Client, Label("Enabled"), Description("Enable or disable this mod's features.")]
+        public bool Enabled { get; set; } = true;
+
+        [Client, Label("Example Number"), Description("An example numeric setting."), Range(1, 100)]
+        public int ExampleNumber { get; set; } = 10;
+
+        [Client, Label("Example Scale"), Description("An example decimal setting."), Range(0.1f, 5.0f)]
+        public float ExampleFloat { get; set; } = 1.0f;
+    }
+
     /// <summary>
     /// Main mod class. Rename this namespace and class to match your mod.
     /// </summary>
@@ -16,21 +36,15 @@ namespace ModTemplate
 
         private ILogger _log;
         private ModContext _context;
-
-        // Config values - cached for performance, updated in OnConfigChanged
-        private bool _enabled = true;
-        private int _exampleNumber = 10;
-        private float _exampleFloat = 1.0f;
+        private MyModConfig _config;
 
         public void Initialize(ModContext context)
         {
             _log = context.Logger;
             _context = context;
+            _config = context.GetConfig<MyModConfig>();
 
             _log.Info($"{Name} v{Version} initialized!");
-
-            // Load config values
-            LoadConfigValues();
 
             // Register keybinds
             context.RegisterKeybind("toggle", "Toggle Feature", "Toggle the main feature", "F7", OnTogglePressed);
@@ -46,35 +60,34 @@ namespace ModTemplate
             // NPCEvents.OnBossSpawn += OnBossSpawn;
         }
 
+        /// <summary>
+        /// Called after all mods have initialized and runtime type IDs are assigned.
+        /// Use for cross-mod lookups (context.GetItemType, context.TryGetItemType).
+        /// </summary>
+        public void OnContentReady(ModContext context)
+        {
+            // Cross-mod item lookups are valid here:
+            // int swordType = context.GetItemType("other-mod", "cool-sword");
+        }
+
         private void OnTogglePressed()
         {
-            _enabled = !_enabled;
-            _log.Info($"Feature is now: {(_enabled ? "ENABLED" : "DISABLED")}");
+            _config.Enabled = !_config.Enabled;
+            _config.Save();
+            _log.Info($"Feature is now: {(_config.Enabled ? "ENABLED" : "DISABLED")}");
         }
 
         #region Config
 
         /// <summary>
         /// Optional: called when config is changed via the mod menu (F6).
-        /// Detected via reflection — not part of the IMod interface.
+        /// Detected via reflection - not part of the IMod interface.
         /// Implement this to support live config updates without restart.
         /// If omitted, the mod menu shows "restart required" for config changes.
         /// </summary>
         public void OnConfigChanged()
         {
-            _log.Info("Config changed, reloading values...");
-            LoadConfigValues();
-        }
-
-        private void LoadConfigValues()
-        {
-            if (_context?.Config == null) return;
-
-            _enabled = _context.Config.Get("enabled", true);
-            _exampleNumber = _context.Config.Get("exampleNumber", 10);
-            _exampleFloat = _context.Config.Get("exampleFloat", 1.0f);
-
-            _log.Debug($"Config loaded: enabled={_enabled}, exampleNumber={_exampleNumber}, exampleFloat={_exampleFloat}");
+            _log.Info($"Config changed: Enabled={_config.Enabled}, ExampleNumber={_config.ExampleNumber}");
         }
 
         #endregion
@@ -106,7 +119,7 @@ namespace ModTemplate
 
         // private void OnUpdate()
         // {
-        //     if (!_enabled) return;
+        //     if (!_config.Enabled) return;
         //     // Called every frame - be careful with performance!
         // }
 

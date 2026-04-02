@@ -418,11 +418,28 @@ namespace Randomizer.UI
             }
             else
             {
-                int hashSeed = text.GetHashCode();
+                int hashSeed = DeterministicHash(text);
                 if (hashSeed == 0) hashSeed = 1; // Prevent zero triggering random seed
                 _mod.OnSeedChanged(hashSeed);
                 _lastSyncedSeed = _mod.Seed.Seed;
                 _seedInput.Text = _mod.Seed.Seed.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Deterministic FNV-1a hash for seed strings. Platform-independent unlike String.GetHashCode().
+        /// </summary>
+        public static int DeterministicHash(string s)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char c in s)
+                {
+                    hash ^= c;
+                    hash *= 16777619;
+                }
+                return (int)hash;
             }
         }
 

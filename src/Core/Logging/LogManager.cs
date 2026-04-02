@@ -37,6 +37,26 @@ namespace TerrariaModder.Core.Logging
         private static readonly object _logLock = new object();
         private static readonly object _fileLock = new object();
 
+        private static bool? _isDedicatedServerOverride;
+
+        /// <summary>
+        /// When true, log messages are written to file only (not Console).
+        /// Used during dedicated server startup to avoid flooding the interactive world selection prompt.
+        /// </summary>
+        public static bool SuppressConsole { get; set; }
+
+        /// <summary>
+        /// True when running as a dedicated server.
+        /// Causes logs to go to terrariamodder.server.log instead of terrariamodder.log.
+        /// Auto-detects from TERRARIA_MODDER_DEDSERV env var (set by injector before mod loading).
+        /// Can be overridden explicitly by PluginLoader.
+        /// </summary>
+        public static bool IsDedicatedServer
+        {
+            get => _isDedicatedServerOverride ?? (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1");
+            set => _isDedicatedServerOverride = value;
+        }
+
         /// <summary>
         /// Initialize the log manager. Call once at startup.
         /// </summary>
@@ -58,7 +78,8 @@ namespace TerrariaModder.Core.Logging
                         Directory.CreateDirectory(logDirectory);
                     }
 
-                    _logFilePath = Path.Combine(logDirectory, "terrariamodder.log");
+                    string logName = IsDedicatedServer ? "terrariamodder.server.log" : "terrariamodder.log";
+                    _logFilePath = Path.Combine(logDirectory, logName);
 
                     // Rotate if log is too large
                     RotateLogIfNeeded();

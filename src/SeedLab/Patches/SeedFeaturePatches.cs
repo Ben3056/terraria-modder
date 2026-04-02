@@ -128,10 +128,10 @@ namespace SeedLab.Patches
                 }
             }
 
-            // 7. WorldGen.ShakeTree (private static, no params)
+            // 7. WorldGen.ShakeTree (private static, int i, int j)
             {
                 var shakeTree = worldGenType.GetMethod("ShakeTree",
-                    BindingFlags.NonPublic | BindingFlags.Static, null, Type.EmptyTypes, null);
+                    BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(int), typeof(int) }, null);
                 if (shakeTree != null)
                 {
                     PatchMethod(shakeTree, nameof(ShakeTree_Prefix), nameof(ShakeTree_Postfix));

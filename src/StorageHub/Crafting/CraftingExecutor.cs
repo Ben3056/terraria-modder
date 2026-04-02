@@ -19,6 +19,12 @@ namespace StorageHub.Crafting
         private readonly ILogger _log;
         private readonly IStorageProvider _storage;
 
+        /// <summary>
+        /// When true, items in hotbar slots 0-9 of the player inventory are never
+        /// consumed as crafting materials.
+        /// </summary>
+        public bool ProtectHotbar { get; set; }
+
         public CraftingExecutor(ILogger log, IStorageProvider storage)
         {
             _log = log;
@@ -74,6 +80,10 @@ namespace StorageHub.Crafting
                     {
                         if (remaining <= 0) break;
                         if (item.IsEmpty) continue;
+
+                        // Skip hotbar slots (0-9) in player inventory when protection is enabled
+                        if (ProtectHotbar && item.SourceChestIndex == SourceIndex.PlayerInventory && item.SourceSlot < 10)
+                            continue;
 
                         // Match: exact ID for normal ingredients, any valid ID for recipe groups
                         bool matches = ing.IsRecipeGroup && ing.ValidItemIds != null
@@ -145,6 +155,7 @@ namespace StorageHub.Crafting
                     else
                     {
                         _log.Error($"CRITICAL: Only fully restored {restored}/{consumed.Count} items ({partialRestores} partial) - some may be lost!");
+                        try { Terraria.Main.NewText("[StorageHub] Crafting failed! Some materials may be lost. Check logs.", 255, 80, 80); } catch { }
                     }
                     return false;
                 }
@@ -194,6 +205,7 @@ namespace StorageHub.Crafting
                     else
                     {
                         _log.Error($"CRITICAL: Only fully restored {restored}/{consumed.Count} material entries ({partialRestores2} partial) - some may be lost!");
+                        try { Terraria.Main.NewText("[StorageHub] Crafting failed! Some materials may be lost. Check logs.", 255, 80, 80); } catch { }
                     }
                     return false;
                 }
@@ -291,7 +303,11 @@ namespace StorageHub.Crafting
                     return true;
                 }
 
-                // FALLBACK: Put directly in inventory slots
+                // FALLBACK: Put directly in inventory slots.
+                // Sends packet 5 per modified slot so clients see the item appear.
+                // This path should never trigger in normal Host & Play (QuickSpawnItem
+                // always succeeds when CreateEntitySource returns non-null), but must
+                // be correct in case it does.
                 int fallbackRemaining = stack;
                 for (int i = 0; i < Math.Min(player.inventory.Length, 50) && fallbackRemaining > 0; i++)
                 {
@@ -303,6 +319,8 @@ namespace StorageHub.Crafting
                     int toPlace = Math.Min(fallbackRemaining, maxStack);
                     slot.stack = toPlace;
                     fallbackRemaining -= toPlace;
+                    if (Main.netMode != 0)
+                        try { NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, i); } catch { }
                 }
 
                 if (fallbackRemaining <= 0) return true;

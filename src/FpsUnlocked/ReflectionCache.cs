@@ -129,7 +129,7 @@ namespace FpsUnlocked
         public static FieldInfo Vec2YField;            // Vector2.Y
 
         // Max entity counts
-        public static int MaxPlayers = 256;
+        public static int MaxPlayers = 255;
         public static int MaxNpcs = 200;
         public static int MaxProjectiles = 1001;
         public static int MaxDust = 6001;

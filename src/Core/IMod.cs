@@ -28,16 +28,6 @@ namespace TerrariaModder.Core
         void Initialize(ModContext context);
 
         /// <summary>
-        /// Called when a world is loaded/entered.
-        /// </summary>
-        void OnWorldLoad();
-
-        /// <summary>
-        /// Called when leaving a world.
-        /// </summary>
-        void OnWorldUnload();
-
-        /// <summary>
         /// Called when the mod is being unloaded. Clean up resources here.
         /// </summary>
         void Unload();

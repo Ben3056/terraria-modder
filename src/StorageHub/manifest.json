@@ -1,43 +1,11 @@
-{
+﻿{
   "id": "storage-hub",
   "name": "Storage Hub",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "framework_version": ">=0.2.0",
   "author": "TerrariaModder",
   "description": "Unified storage access, crafting, and item management. Access all your chests from one place.",
   "entry_dll": "StorageHub.dll",
-  "config_schema": {
-    "enabled": {
-      "type": "bool",
-      "default": true,
-      "label": "Enabled",
-      "description": "Master toggle for the Storage Hub mod. When disabled, the toggle keybind does nothing."
-    },
-    "blockHotbarFromCrafting": {
-      "type": "bool",
-      "default": false,
-      "label": "Protect Hotbar",
-      "description": "Prevent items in your hotbar (slots 1-10) from being consumed by crafting recipes in the Storage Hub."
-    },
-    "recursiveCrafting": {
-      "type": "bool",
-      "default": true,
-      "label": "Recursive Crafting",
-      "description": "Auto-craft missing intermediate materials from stored items. E.g. auto-smelt bars when crafting something that needs them."
-    },
-    "recursiveCraftingDepth": {
-      "type": "int",
-      "default": 0,
-      "label": "Recursive Depth",
-      "description": "Maximum depth for recursive sub-crafting. 0 = unlimited, 1 = one level of sub-crafting, 2-5 = deeper chains."
-    },
-    "paintingChest": {
-      "type": "bool",
-      "default": true,
-      "label": "Painting Chest",
-      "description": "Enable the Mysterious Painting (a painting that functions as a chest with upgradeable capacity)"
-    }
-  },
   "keybinds": [
     {
       "id": "toggle",
@@ -45,5 +13,6 @@
       "description": "Open/close the Storage Hub UI",
       "default": "F5"
     }
-  ]
+  ],
+  "multiplayer": "required"
 }

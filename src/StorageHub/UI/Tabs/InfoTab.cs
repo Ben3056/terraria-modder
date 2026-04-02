@@ -469,7 +469,7 @@ namespace StorageHub.UI.Tabs
             if (IsVisible(y, SectionHeight))
             {
                 UIRenderer.DrawRect(x, y, width, SectionHeight, UIColors.HeaderBg);
-                UIRenderer.DrawText("Mysterious Painting", x + 10, y + 6, UIColors.TextTitle);
+                UIRenderer.DrawText("Mysterious Chest", x + 10, y + 6, UIColors.TextTitle);
             }
             y += SectionHeight + 5;
 
@@ -647,7 +647,7 @@ namespace StorageHub.UI.Tabs
                     var inventory = player.inventory;
                     if (inventory != null)
                     {
-                        for (int i = 0; i < inventory.Length; i++)
+                        for (int i = 0; i < Math.Min(inventory.Length, 50); i++)
                         {
                             var item = inventory[i];
                             if (item == null) continue;

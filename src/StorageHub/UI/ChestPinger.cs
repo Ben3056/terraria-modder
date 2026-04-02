@@ -55,9 +55,16 @@ namespace StorageHub.UI
         /// <summary>
         /// Update the ping effect. Call every frame.
         /// </summary>
+        private uint _lastGameTick;
+
         public void Update()
         {
             if (_pingTimer <= 0) return;
+
+            // Only tick on game-logic frames (not FpsUnlocked partial ticks)
+            uint tick = Main.GameUpdateCount;
+            if (tick == _lastGameTick) return;
+            _lastGameTick = tick;
 
             _pingTimer--;
 

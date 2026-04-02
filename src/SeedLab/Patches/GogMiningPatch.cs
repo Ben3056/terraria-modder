@@ -43,6 +43,7 @@ namespace SeedLab.Patches
 
         private static bool PickTile_Prefix(int x, int y, int pickPower)
         {
+            if (x < 0 || x >= Main.maxTilesX || y < 0 || y >= Main.maxTilesY) return true;
             var t = Main.tile[x, y];
             if (t != null && t.active() && t.color() == GogGen.GogPaint
                 && pickPower < GogGen.MythrilPickPower)

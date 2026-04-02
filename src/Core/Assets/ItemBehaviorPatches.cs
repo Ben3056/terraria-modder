@@ -406,22 +406,19 @@ namespace TerrariaModder.Core.Assets
 
         // ── 7. UpdateEquip ──
 
-        private static void UpdateEquip_Postfix(Player __instance)
+        private static void UpdateEquip_Postfix(Player __instance, int i)
         {
             try
             {
-                // Accessory slots are armor[3..9] (indices 3-9)
-                for (int i = 3; i < 10; i++)
-                {
-                    if (i >= __instance.armor.Length) break;
-                    var item = __instance.armor[i];
-                    if (item == null || item.type < ItemRegistry.VanillaItemCount) continue;
+                // Use the slot index from Player.UpdateEquips(int i) directly
+                if (i < 0 || i >= __instance.armor.Length) return;
+                var item = __instance.armor[i];
+                if (item == null || item.type < ItemRegistry.VanillaItemCount) return;
 
-                    var def = ItemRegistry.GetDefinition(item.type);
-                    if (def?.UpdateEquip == null) continue;
+                var def = ItemRegistry.GetDefinition(item.type);
+                if (def?.UpdateEquip == null) return;
 
-                    def.UpdateEquip(__instance);
-                }
+                def.UpdateEquip(__instance);
             }
             catch (Exception ex)
             {

@@ -36,8 +36,8 @@ Extend your range to distant areas without upgrading tier:
 - Each relay adds additional range around its position
 - Perfect for connecting multiple bases
 
-### Painting Chest (Mysterious Painting)
-A painting that functions as a chest with upgradeable capacity:
+### Mysterious Chest
+A chest with upgradeable capacity (sold by Merchant):
 - Starts at 40 slots (like a normal chest)
 - Upgrade by consuming chest items (any item that places a chest tile)
 - 5 capacity levels: 40 → 80 → 200 → 1,000 → 5,000 slots
@@ -81,7 +81,7 @@ The tab also handles vanilla edge cases: custom shimmer results (5 recipes retur
 - Upgrade tier (consume materials to increase chest range)
 - Unlock special features (water/honey/lava crafting, snow biome, graveyard, shimmer, altars)
 - View current tier and range
-- Manage Painting Chest upgrades (if enabled)
+- Manage Mysterious Chest upgrades (if enabled)
 
 ### Network Tab
 - See registered chests and their status
@@ -130,7 +130,7 @@ Consume specific items to unlock additional features:
 | Protect Hotbar | false | Prevent hotbar items from being consumed by crafting |
 | Recursive Crafting | true | Auto-craft missing intermediate materials |
 | Recursive Depth | 0 | Max sub-crafting depth (0 = unlimited) |
-| Painting Chest | true | Enable the Mysterious Painting feature |
+| Mysterious Chest | true | Enable the Mysterious Chest feature |
 
 ### Per-World Data
 
@@ -195,7 +195,7 @@ The session log is especially useful for item-related bugs (shimmer failures, cr
 - Station memory at Tier 3+
 - Shimmer decrafting with protection
 - Relay system for range extension
-- Painting Chest (Mysterious Painting) with 5 capacity tiers
+- Mysterious Chest (Mysterious Chest) with 5 capacity tiers
 - Recursive crafting with configurable depth
 
 ## Multiplayer

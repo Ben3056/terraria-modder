@@ -18,6 +18,7 @@ namespace Randomizer.Modules
 
         internal static WeatherModule Instance;
 
+        private static long _lastTickMs;
         private int _tickCounter;
         private int _nextChangeAt;
         private Random _rng;
@@ -32,7 +33,13 @@ namespace Randomizer.Modules
 
         public void OnUpdate()
         {
-            if (!Enabled || !Game.InWorld) return;
+            if (!Enabled || !Game.InWorld || Main.netMode != 0 || _rng == null) return;
+
+            // Rate-limit to ~60fps equivalent so counters don't run fast at high FPS
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            long elapsedMs = (now - _lastTickMs) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            if (elapsedMs < 16) return;
+            _lastTickMs = now;
 
             _tickCounter++;
             if (_tickCounter < _nextChangeAt) return;

@@ -14,15 +14,17 @@ namespace Randomizer.Modules
         public override string Id => "shops";
         public override string Name => "Shop Shuffle";
         public override string Description => "NPC shops sell shuffled items";
-        public override string Tooltip => "All NPC shop inventories are shuffled. Items keep their original prices. Same seed = same shops every time.";
+        public override string Tooltip => "All NPC shop inventories are shuffled. Items use the new item's price. Same seed = same shops every time.";
 
         internal static ShopModule Instance;
+        private static MethodInfo _patchedMethod;
 
         public override void BuildShuffleMap()
         {
             Instance = this;
+            int maxItemId = Terraria.ID.ItemID.Count - 1;
             var pool = new List<int>();
-            for (int i = 1; i <= 6144; i++) // ItemID.Count=6145, last valid=6144
+            for (int i = 1; i <= maxItemId; i++)
             {
                 pool.Add(i);
             }
@@ -43,6 +45,7 @@ namespace Randomizer.Modules
                     var postfix = typeof(ShopModule).GetMethod(nameof(SetupShop_Postfix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(setupShop, postfix: new HarmonyMethod(postfix));
+                    _patchedMethod = setupShop;
                     Log.Info("[Randomizer] Shop: patched Chest.SetupShop");
                 }
                 else
@@ -63,6 +66,7 @@ namespace Randomizer.Modules
         public static void SetupShop_Postfix(Chest __instance)
         {
             if (Instance == null || !Instance.Enabled) return;
+            if (Main.netMode != 0) return;
 
             try
             {
@@ -94,7 +98,11 @@ namespace Randomizer.Modules
 
         public override void RemovePatches(Harmony harmony)
         {
-            // Handled by harmony.UnpatchAll
+            if (_patchedMethod != null)
+            {
+                harmony.Unpatch(_patchedMethod, HarmonyPatchType.All, "com.terrariamodder.randomizer");
+                _patchedMethod = null;
+            }
         }
     }
 }

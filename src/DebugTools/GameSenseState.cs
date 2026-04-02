@@ -74,6 +74,65 @@ namespace DebugTools
                 AppendArmorSlots(sb, player, 3, 10);
                 sb.Append("], ");
 
+                // Vanity armor and accessories
+                sb.Append("\"vanityArmor\": [");
+                AppendArmorSlots(sb, player, 10, 13);
+                sb.Append("], ");
+
+                sb.Append("\"vanityAccessories\": [");
+                AppendArmorSlots(sb, player, 13, 20);
+                sb.Append("], ");
+
+                // Dye slots
+                sb.Append("\"dyes\": [");
+                AppendDyeSlots(sb, player);
+                sb.Append("], ");
+
+                // Misc equips (pet, light pet, minecart, mount, grapple)
+                sb.Append("\"miscEquips\": [");
+                AppendMiscEquipSlots(sb, player.miscEquips, new[] { "pet", "lightPet", "minecart", "mount", "grapple" });
+                sb.Append("], ");
+
+                // Misc dyes
+                sb.Append("\"miscDyes\": [");
+                AppendMiscEquipSlots(sb, player.miscDyes, new[] { "petDye", "lightPetDye", "minecartDye", "mountDye", "grappleDye" });
+                sb.Append("], ");
+
+                // Trash item
+                sb.Append("\"trash\": ");
+                try
+                {
+                    if (player.trashItem != null && player.trashItem.type != 0)
+                    {
+                        sb.Append("{");
+                        AppendItemFields(sb, player.trashItem);
+                        sb.Append("}");
+                    }
+                    else sb.Append("null");
+                }
+                catch { sb.Append("null"); }
+                sb.Append(", ");
+
+                // Piggy bank (bank)
+                sb.Append("\"piggyBank\": [");
+                AppendChestItems(sb, player.bank);
+                sb.Append("], ");
+
+                // Safe (bank2)
+                sb.Append("\"safe\": [");
+                AppendChestItems(sb, player.bank2);
+                sb.Append("], ");
+
+                // Defender's Forge (bank3)
+                sb.Append("\"defendersForge\": [");
+                AppendChestItems(sb, player.bank3);
+                sb.Append("], ");
+
+                // Void Vault (bank4)
+                sb.Append("\"voidVault\": [");
+                AppendChestItems(sb, player.bank4);
+                sb.Append("], ");
+
                 // Active buffs
                 sb.Append("\"buffs\": [");
                 AppendBuffs(sb, player);
@@ -130,6 +189,66 @@ namespace DebugTools
                     // Skip armor slots that throw during read
                 }
             }
+        }
+
+        private static void AppendDyeSlots(StringBuilder sb, Player player)
+        {
+            bool first = true;
+            try
+            {
+                if (player.dye == null) return;
+                for (int i = 0; i < player.dye.Length; i++)
+                {
+                    var item = player.dye[i];
+                    if (item == null || item.type == 0) continue;
+                    if (!first) sb.Append(", ");
+                    first = false;
+                    sb.Append("{\"slot\": ").Append(i).Append(", ");
+                    AppendItemFields(sb, item);
+                    sb.Append("}");
+                }
+            }
+            catch { }
+        }
+
+        private static void AppendMiscEquipSlots(StringBuilder sb, Item[] items, string[] labels)
+        {
+            bool first = true;
+            try
+            {
+                if (items == null) return;
+                for (int i = 0; i < items.Length && i < labels.Length; i++)
+                {
+                    var item = items[i];
+                    if (item == null || item.type == 0) continue;
+                    if (!first) sb.Append(", ");
+                    first = false;
+                    sb.Append("{\"slot\": ").Append(i).Append(", \"label\": \"").Append(labels[i]).Append("\", ");
+                    AppendItemFields(sb, item);
+                    sb.Append("}");
+                }
+            }
+            catch { }
+        }
+
+        private static void AppendChestItems(StringBuilder sb, Chest chest)
+        {
+            bool first = true;
+            try
+            {
+                if (chest == null || chest.item == null) return;
+                for (int i = 0; i < chest.item.Length; i++)
+                {
+                    var item = chest.item[i];
+                    if (item == null || item.type == 0) continue;
+                    if (!first) sb.Append(", ");
+                    first = false;
+                    sb.Append("{\"slot\": ").Append(i).Append(", ");
+                    AppendItemFields(sb, item);
+                    sb.Append("}");
+                }
+            }
+            catch { }
         }
 
         private static void AppendBuffs(StringBuilder sb, Player player)
@@ -660,6 +779,15 @@ namespace DebugTools
                     string name = "";
                     try { name = npc.GivenOrTypeName ?? ""; } catch { }
 
+                    // Read NPC buffs/debuffs
+                    int[] bt = null, btime = null;
+                    try
+                    {
+                        bt = (int[])npc.buffType.Clone();
+                        btime = (int[])npc.buffTime.Clone();
+                    }
+                    catch { }
+
                     var info = new NpcInfo
                     {
                         Type = npc.type,
@@ -671,7 +799,9 @@ namespace DebugTools
                         RelX = dx / 16f,
                         RelY = dy / 16f,
                         Friendly = npc.friendly,
-                        IsBoss = npc.boss
+                        IsBoss = npc.boss,
+                        BuffTypes = bt,
+                        BuffTimes = btime
                     };
 
                     if (npc.friendly)
@@ -768,6 +898,103 @@ namespace DebugTools
             sb.Append("}");
         }
 
+        /// <summary>
+        /// Returns structured tile data with type IDs for a rectangular region.
+        /// Used by /api/state/tiles/raw for precise tile verification.
+        /// </summary>
+        public static string GetTilesRaw(int centerX, int centerY, int width, int height, bool playerCentered)
+        {
+            try
+            {
+                if (width > 50) width = 50;
+                if (height > 50) height = 50;
+                if (width <= 0) width = 20;
+                if (height <= 0) height = 20;
+
+                int startX, startY;
+                if (playerCentered)
+                {
+                    var playerPos = Game.PlayerPosition;
+                    startX = (int)(playerPos.X / 16f) - width / 2;
+                    startY = (int)(playerPos.Y / 16f) - height / 2;
+                }
+                else
+                {
+                    startX = centerX;
+                    startY = centerY;
+                }
+
+                int maxX = Game.MaxTilesX;
+                int maxY = Game.MaxTilesY;
+
+                var sb = new StringBuilder(4096);
+                sb.Append("{");
+                sb.Append("\"startX\": ").Append(startX).Append(", ");
+                sb.Append("\"startY\": ").Append(startY).Append(", ");
+                sb.Append("\"width\": ").Append(width).Append(", ");
+                sb.Append("\"height\": ").Append(height).Append(", ");
+                sb.Append("\"tiles\": [");
+
+                bool firstTile = true;
+                for (int y = startY; y < startY + height; y++)
+                {
+                    for (int x = startX; x < startX + width; x++)
+                    {
+                        if (x < 0 || x >= maxX || y < 0 || y >= maxY) continue;
+
+                        try
+                        {
+                            var tile = Main.tile[x, y];
+                            if (tile == null) continue;
+
+                            bool active = tile.active();
+                            int type = active ? tile.type : -1;
+                            int wall = tile.wall;
+                            int liquid = tile.liquid;
+                            int liquidType = liquid > 0 ? tile.liquidType() : 0;
+
+                            // Skip completely empty tiles
+                            if (!active && wall == 0 && liquid == 0) continue;
+
+                            if (!firstTile) sb.Append(",");
+                            firstTile = false;
+
+                            sb.Append("{\"x\":").Append(x);
+                            sb.Append(",\"y\":").Append(y);
+                            if (active)
+                            {
+                                sb.Append(",\"type\":").Append(type);
+                                // Include frame data for frame-important tiles (chests, paintings, etc.)
+                                if (Main.tileFrameImportant[type])
+                                {
+                                    sb.Append(",\"frameX\":").Append(tile.frameX);
+                                    sb.Append(",\"frameY\":").Append(tile.frameY);
+                                }
+                                if (tile.halfBrick()) sb.Append(",\"half\":true");
+                                int slope = tile.slope();
+                                if (slope > 0) sb.Append(",\"slope\":").Append(slope);
+                            }
+                            if (wall > 0) sb.Append(",\"wall\":").Append(wall);
+                            if (liquid > 0)
+                            {
+                                sb.Append(",\"liquid\":").Append(liquid);
+                                sb.Append(",\"liqType\":").Append(liquidType);
+                            }
+                            sb.Append("}");
+                        }
+                        catch { }
+                    }
+                }
+
+                sb.Append("]}");
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return ErrorResponse("GetTilesRaw", ex);
+            }
+        }
+
         #endregion
 
         #region Helpers
@@ -784,6 +1011,8 @@ namespace DebugTools
             public float RelY;
             public bool Friendly;
             public bool IsBoss;
+            public int[] BuffTypes;
+            public int[] BuffTimes;
         }
 
         private static void AppendItem(StringBuilder sb, Item item)
@@ -825,20 +1054,24 @@ namespace DebugTools
             // Modded item info (v3: uses ItemRegistry type lookup)
             try
             {
+                string fullId = null;
+                bool isPlaceholder = false;
                 if (ItemRegistry.IsCustomItem(item.type))
+                    fullId = ItemRegistry.GetFullId(item.type);
+                else if (ItemRegistry.IsKnownUnknown(item.type, out string kuId))
+                { fullId = kuId; isPlaceholder = true; }
+
+                if (fullId != null)
                 {
-                    string fullId = ItemRegistry.GetFullId(item.type);
                     sb.Append(", \"modded\": true");
-                    if (fullId != null)
+                    if (isPlaceholder) sb.Append(", \"placeholder\": true");
+                    int colonIdx = fullId.IndexOf(':');
+                    if (colonIdx > 0)
                     {
-                        int colonIdx = fullId.IndexOf(':');
-                        if (colonIdx > 0)
-                        {
-                            sb.Append(", \"modId\": \"").Append(EscapeJson(fullId.Substring(0, colonIdx))).Append("\"");
-                            sb.Append(", \"itemName\": \"").Append(EscapeJson(fullId.Substring(colonIdx + 1))).Append("\"");
-                        }
-                        sb.Append(", \"fullId\": \"").Append(EscapeJson(fullId)).Append("\"");
+                        sb.Append(", \"modId\": \"").Append(EscapeJson(fullId.Substring(0, colonIdx))).Append("\"");
+                        sb.Append(", \"itemName\": \"").Append(EscapeJson(fullId.Substring(colonIdx + 1))).Append("\"");
                     }
+                    sb.Append(", \"fullId\": \"").Append(EscapeJson(fullId)).Append("\"");
                 }
             }
             catch { }
@@ -856,6 +1089,22 @@ namespace DebugTools
             sb.Append("\"relY\": ").Append((int)info.RelY);
             if (info.IsBoss)
                 sb.Append(", \"boss\": true");
+            // Append active buffs/debuffs
+            if (info.BuffTypes != null)
+            {
+                sb.Append(", \"buffs\": [");
+                bool first = true;
+                for (int i = 0; i < info.BuffTypes.Length; i++)
+                {
+                    if (info.BuffTypes[i] == 0) continue;
+                    if (!first) sb.Append(", ");
+                    first = false;
+                    sb.Append("{\"id\": ").Append(info.BuffTypes[i]);
+                    sb.Append(", \"time\": ").Append(info.BuffTimes[i] / 60);
+                    sb.Append("}");
+                }
+                sb.Append("]");
+            }
             sb.Append("}");
         }
 

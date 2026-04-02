@@ -44,6 +44,10 @@ namespace SeedLab.Gen
 
         private static ILogger _log;
         private static readonly UnifiedRandom _fallbackRng = new UnifiedRandom();
+        private static long _lastTickMs;
+
+        /// <summary>True when Gog tiles have been generated and spread should run.</summary>
+        public static bool SpreadActive { get; set; }
 
         public static void Initialize(ILogger log) => _log = log;
 
@@ -71,6 +75,7 @@ namespace SeedLab.Gen
                 blobs++;
             }
 
+            if (blobs > 0) SpreadActive = true;
             _log?.Info($"[SeedLab] GogGen: SpawnAtBorders placed {blobs} blob(s)");
         }
 
@@ -82,6 +87,7 @@ namespace SeedLab.Gen
             var rng = WorldGen.genRand ?? _fallbackRng;
             int surfaceH = (int)Main.worldSurface;
             PaintBlob(Main.spawnTileX, Main.spawnTileY, SpawnBlobRadius, rng, surfaceH);
+            SpreadActive = true;
             _log?.Info($"[SeedLab] GogGen: SpawnAtSpawn painted blob at ({Main.spawnTileX}, {Main.spawnTileY})");
         }
 
@@ -93,7 +99,15 @@ namespace SeedLab.Gen
         /// </summary>
         public static void UpdateSpread()
         {
+            if (Main.netMode != 0) return;
             if (Main.gameMenu) return;
+            if (!SpreadActive) return;
+
+            // Rate-limit to ~60fps equivalent so spread doesn't run fast at high FPS
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            long elapsedMs = (now - _lastTickMs) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            if (elapsedMs < 16) return;
+            _lastTickMs = now;
 
             var rng = WorldGen.genRand ?? _fallbackRng;
             int worldW = Main.maxTilesX;
@@ -115,6 +129,41 @@ namespace SeedLab.Gen
                 if (nt == null || !nt.active() || nt.color() == GogPaint) continue;
 
                 WorldGen.paintTile(nx, ny, GogPaint, broadCast: false, paintEffects: false);
+            }
+        }
+
+        /// <summary>
+        /// Samples ~200 random surface tiles to detect existing Gog paint.
+        /// If found, reactivates SpreadActive so spread resumes after world reload.
+        /// </summary>
+        public static void CheckForExistingGogTiles()
+        {
+            if (SpreadActive) return;
+
+            try
+            {
+                var rng = new UnifiedRandom();
+                int worldW = Main.maxTilesX;
+                int surfaceH = (int)Main.worldSurface;
+                if (worldW <= 10 || surfaceH <= 10) return;
+
+                for (int i = 0; i < 200; i++)
+                {
+                    int x = rng.Next(5, worldW - 5);
+                    int y = rng.Next(5, surfaceH);
+
+                    var t = Main.tile[x, y];
+                    if (t != null && t.active() && t.color() == GogPaint)
+                    {
+                        SpreadActive = true;
+                        _log?.Info("[SeedLab] GogGen: Found existing Gog tiles on world reload — spread reactivated");
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.Error($"[SeedLab] GogGen.CheckForExistingGogTiles failed: {ex.Message}");
             }
         }
 

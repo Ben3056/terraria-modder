@@ -1,16 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
 using Terraria;
 using Terraria.ID;
 using Terraria.UI;
 using Microsoft.Xna.Framework;
 using TerrariaModder.Core;
+using TerrariaModder.Core.Debug;
 using TerrariaModder.Core.Events;
 using TerrariaModder.Core.Logging;
 
 namespace QuickKeys
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle, IModStateProvider, IModActionProvider
     {
         public string Id => "quick-keys";
         public string Name => "Quick Keys";
@@ -21,6 +24,7 @@ namespace QuickKeys
         private bool _enabled;
         private bool _showMessages;
         private bool _enableExtendedHotbar;
+        private QuickKeysConfig _config;
 
         // Ruler
         private static bool _rulerActive = false;
@@ -30,16 +34,19 @@ namespace QuickKeys
         private static int _originalSelectedItem = -1;
         private static int _swappedSlot = -1;
         private static bool _placingTorch = false;
-        private static bool _usedSelectMethod = false; // true = used SelectItem, false = used swap
+
+        // Channeled item support: keep controlUseItem=true while item is animating.
+        // Set when we start a quick-use; cleared in PostUpdate after the revert.
+        // The ItemCheck_Prefix Harmony patch reads this flag to force controlUseItem=true
+        // right before Player.Update()'s own ItemCheck() call, enabling channeled items
+        // (e.g. Magic Mirror) to complete their full animation without the user holding LMB.
+        private static bool _keepUsingItem = false;
+        private static Harmony _harmony;
 
         // Terraria item IDs for recall items (priority order)
         private static readonly int[] RecallItemIds = new int[] {
             3124,  // Cell Phone
-            5437,  // Shellphone (base)
-            5358,  // Shellphone (spawn)
-            5359,  // Shellphone (ocean)
-            5360,  // Shellphone (underworld)
-            5361,  // Shellphone (home)
+            5358,  // Shellphone (recall variant only — excludes Spawn/Ocean/Hell variants)
             50,    // Magic Mirror
             3199,  // Ice Mirror
             2350   // Recall Potion
@@ -51,8 +58,15 @@ namespace QuickKeys
         {
             _log = context.Logger;
             _context = context;
+            _config = context.GetConfig<QuickKeysConfig>();
 
             LoadConfig();
+
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _log.Info("QuickKeys: dedicated server — skipping client init");
+                return;
+            }
 
             // Always register keybinds so they appear in F6 menu, even if mod is disabled
             // The callback functions check _enabled before doing anything
@@ -80,22 +94,83 @@ namespace QuickKeys
                 return;
             }
 
+            // Patch Player.ItemCheck so we can force controlUseItem=true while a quick-use
+            // item is active. This is needed for channeled items (Magic Mirror, etc.) where
+            // Player.Update() would otherwise clear controlUseItem before calling ItemCheck.
+            _harmony = new Harmony("com.terrariamodder.quickkeys");
+            try
+            {
+                var itemCheckMethod = typeof(Player).GetMethod("ItemCheck",
+                    BindingFlags.Public | BindingFlags.Instance,
+                    null, Type.EmptyTypes, null);
+                if (itemCheckMethod != null)
+                {
+                    _harmony.Patch(itemCheckMethod,
+                        prefix: new HarmonyMethod(typeof(Mod), nameof(ItemCheck_Prefix)));
+                    _log.Debug("Patched Player.ItemCheck for channeled item support");
+                }
+                else
+                {
+                    _log.Warn("Player.ItemCheck not found — channeled items (e.g. Magic Mirror) may not complete");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Warn($"Failed to patch Player.ItemCheck: {ex.Message}");
+            }
+
             // Subscribe to post-update for item restoration
             FrameEvents.OnPostUpdate += OnPostUpdate;
 
+            context.RegisterStateProvider(this);
+            context.RegisterActionProvider(this);
             _log.Info("QuickKeys initialized - keybinds registered with F6 menu");
         }
 
 
+        public Dictionary<string, object> GetModState()
+        {
+            return new Dictionary<string, object>
+            {
+                { "enabled", _enabled },
+                { "rulerActive", _rulerActive },
+                { "extendedHotbarEnabled", _enableExtendedHotbar },
+                { "showMessages", _showMessages }
+            };
+        }
+
+        public List<ModActionInfo> GetActions()
+        {
+            return new List<ModActionInfo>
+            {
+                new ModActionInfo("auto_torch", "Place a torch near cursor"),
+                new ModActionInfo("auto_recall", "Use recall item (mirror/phone)"),
+                new ModActionInfo("quick_stack", "Quick stack to nearby chests"),
+                new ModActionInfo("toggle_ruler", "Toggle ruler distance overlay"),
+            };
+        }
+
+        public ModActionResult ExecuteAction(string name, Dictionary<string, string> args)
+        {
+            switch (name)
+            {
+                case "auto_torch": OnAutoTorch(); EventLog.Emit("quick-keys", "auto_torch", "{\"action\":\"torch_placed\"}"); return ModActionResult.Ok("Auto torch triggered");
+                case "auto_recall": OnAutoRecall(); EventLog.Emit("quick-keys", "auto_recall", "{\"action\":\"recall_used\"}"); return ModActionResult.Ok("Auto recall triggered");
+                case "quick_stack": OnQuickStack(); EventLog.Emit("quick-keys", "quick_stack", "{\"action\":\"stacked\"}"); return ModActionResult.Ok("Quick stack triggered");
+                case "toggle_ruler": OnRulerToggle(); EventLog.Emit("quick-keys", "toggle_ruler", $"{{\"active\":{(_rulerActive ? "true" : "false")}}}"); return ModActionResult.Ok(_rulerActive ? "Ruler ON" : "Ruler OFF");
+                default: return null;
+            }
+        }
+
         private void LoadConfig()
         {
-            _enabled = _context.Config.Get<bool>("enabled");
-            _showMessages = _context.Config.Get<bool>("showMessages");
-            _enableExtendedHotbar = _context.Config.Get<bool>("enableExtendedHotbar");
+            if (_config == null) return;
+            _enabled = _config.Enabled;
+            _showMessages = _config.ShowMessages;
+            _enableExtendedHotbar = _config.EnableExtendedHotbar;
 
             // Enable debug logging if configured
-            bool debugLogging = _context.Config.Get("debugLogging", false);
-            if (debugLogging)
+            if (_config.DebugLogging)
             {
                 _log.MinLevel = TerrariaModder.Core.Logging.LogLevel.Debug;
             }
@@ -168,6 +243,7 @@ namespace QuickKeys
         private void OnAutoTorch()
         {
             if (!_enabled) return;
+            if (_autoRevertSelectedItem) return;
             if (_placingTorch) return;
             _placingTorch = true;
 
@@ -211,21 +287,13 @@ namespace QuickKeys
                     return;
                 }
 
-                // Select the torch item directly (like HelpfulHotkeys does)
+                // Select the torch item by swapping it to the current hotbar slot
                 int originalSelected = player.selectedItem;
                 bool needRestore = (originalSelected != torchSlot);
 
                 if (needRestore)
                 {
-                    // Try to set selectedItem via selectedItemState.Select
-                    bool selected = SelectItem(player, torchSlot);
-                    if (selected)
-                        _usedSelectMethod = true;
-                    else
-                    {
-                        SwapInventorySlots(inventory, originalSelected, torchSlot);
-                        _usedSelectMethod = false;
-                    }
+                    SwapInventorySlots(inventory, originalSelected, torchSlot);
                     _autoRevertSelectedItem = true;
                     _originalSelectedItem = originalSelected;
                     _swappedSlot = torchSlot;
@@ -294,7 +362,15 @@ namespace QuickKeys
                     {
                         try
                         {
-                            bool placed = WorldGen.PlaceTile(tileX, tileY, torchTileType, false, false, Main.myPlayer, torchPlaceStyle);
+                            // Apply Torch God's Favor biome conversion for regular torches (tile 4, style 0)
+                            int placeTileType = torchTileType;
+                            int placeStyle = torchPlaceStyle;
+                            if (placeTileType == 4 && placeStyle == 0 && player.UsingBiomeTorches)
+                            {
+                                player.BiomeTorchPlaceStyle(ref placeTileType, ref placeStyle);
+                            }
+
+                            bool placed = WorldGen.PlaceTile(tileX, tileY, placeTileType, false, false, Main.myPlayer, placeStyle);
                             if (placed)
                             {
                                 // Consume one torch from inventory
@@ -304,6 +380,20 @@ namespace QuickKeys
                                     if (torchItem.stack <= 0)
                                         torchItem.TurnToAir();
                                 }
+
+                                // Replicate to other players in multiplayer.
+                                // WorldGen.PlaceTile does NOT send any packets — we must do it manually.
+                                // Packet 17 action=1 = place tile. Server broadcasts to all clients except sender.
+                                // Packet 5 syncs the consumed torch inventory slot.
+                                if (Main.netMode != 0)
+                                {
+                                    NetMessage.TrySendData(17, -1, -1, null, 1, tileX, tileY, placeTileType, placeStyle);
+                                    // Sync the slot with the consumed torch (originalSelected after swap, or torchSlot if no swap)
+                                    NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, originalSelected);
+                                    if (needRestore)
+                                        NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, torchSlot);
+                                }
+
                                 placeSuccess = true;
                                 break;
                             }
@@ -368,6 +458,22 @@ namespace QuickKeys
                 }
 
                 QuickUseItemAt(player, inventory, foundSlot);
+
+                // Speed up the recall animation. The mirror/phone teleport fires at
+                // itemTime == item.useTime/2, not at 0. Set itemTime to useTime/2+1 so
+                // the next ItemCheck decrement hits the trigger on the very next frame.
+                // itemAnimation=1 ends the animation that same frame so the revert follows immediately.
+                try
+                {
+                    if (player.itemAnimation > 0)
+                    {
+                        int useTime = player.inventory[player.selectedItem].useTime;
+                        player.itemTime = useTime / 2 + 1;
+                        player.itemAnimation = 1;
+                    }
+                }
+                catch { }
+
                 ShowMessage($"Using {itemName}", 173, 216, 230);
             }
             catch (Exception ex)
@@ -409,17 +515,13 @@ namespace QuickKeys
 
         #region Item Quick Use & Restoration
 
-        private void QuickUseItemAt(Player player, Item[] inventory, int slot, bool use = true)
+        private void QuickUseItemAt(Player player, Item[] inventory, int slot)
         {
             if (_autoRevertSelectedItem || player == null || inventory == null) return;
 
             int selectedItem = player.selectedItem;
             if (selectedItem == slot) return;
             if (inventory[slot].type == 0) return;
-
-            _originalSelectedItem = selectedItem;
-            _swappedSlot = slot;
-            _autoRevertSelectedItem = true;
 
             // Check if player can switch
             int itemAnimation = player.itemAnimation;
@@ -428,19 +530,39 @@ namespace QuickKeys
 
             if (itemAnimation == 0 && itemTimeIsZero && reuseDelay == 0)
             {
-                // Try SelectItem first, fall back to swap
-                bool selected = SelectItem(player, slot);
-                if (selected)
-                    _usedSelectMethod = true;
-                else
-                {
-                    SwapInventorySlots(inventory, selectedItem, slot);
-                    _usedSelectMethod = false;
-                }
+                _originalSelectedItem = selectedItem;
+                _swappedSlot = slot;
+                _autoRevertSelectedItem = true;
+                // Swap the target item into the currently selected hotbar slot.
+                // We deliberately avoid player.selectedItemState.Select() — that method sets
+                // an internal 'buffered' field on the struct which Player.Update() applies one
+                // frame later, causing selectedItem to jump to the wrong slot mid-animation
+                // and breaking the swap-back revert logic.
+                SwapInventorySlots(inventory, selectedItem, slot);
+
+                // Start the item use immediately in PreUpdate, before Player.Update() runs.
+                // This is required because Player.Update() resets releaseUseItem=false when the
+                // player isn't holding LMB, which prevents ItemCheck from starting the animation.
+                // By calling ItemCheck() here (while releaseUseItem is still true from the
+                // previous idle frame), we bypass that gate and start the animation correctly.
                 player.controlUseItem = true;
-                if (use)
-                    player.ItemCheck();
+                player.ItemCheck();
+
+                // Keep controlUseItem=true for subsequent frames via the Harmony prefix on
+                // ItemCheck(), so channeled items (Magic Mirror, etc.) can complete their
+                // full animation. The prefix is a no-op once _keepUsingItem=false.
+                _keepUsingItem = true;
             }
+        }
+
+        // Harmony prefix on Player.ItemCheck() — runs right before each call from Player.Update().
+        // Forces controlUseItem=true while we are holding a quick-use item, so channeled items
+        // (e.g. Magic Mirror useStyle=HoldUp) count down their itemTime and fire their effect.
+        // The flag is cleared in OnPostUpdate after the item animation completes and we revert.
+        private static void ItemCheck_Prefix(Player __instance)
+        {
+            if (_keepUsingItem && _autoRevertSelectedItem && __instance.whoAmI == Main.myPlayer)
+                __instance.controlUseItem = true;
         }
 
         private void SwapInventorySlots(Item[] inventory, int slotA, int slotB)
@@ -449,23 +571,6 @@ namespace QuickKeys
             Item temp = inventory[slotA];
             inventory[slotA] = inventory[slotB];
             inventory[slotB] = temp;
-        }
-
-        private bool SelectItem(Player player, int index)
-        {
-            // Use selectedItemState.Select() to change selected item
-            try
-            {
-                player.selectedItemState.Select(index);
-                int verify = player.selectedItem;
-                if (verify == index)
-                    return true;
-            }
-            catch
-            {
-                // Selection failed
-            }
-            return false;
         }
 
         private void OnPostUpdate()
@@ -498,31 +603,30 @@ namespace QuickKeys
                 bool itemTimeIsZero = player.ItemTimeIsZero;
                 int reuseDelay = player.reuseDelay;
 
-                if (itemAnimation == 0 && itemTimeIsZero && reuseDelay == 0)
+                if (itemAnimation == 0 && reuseDelay == 0)
                 {
-                    if (_originalSelectedItem >= 0)
+                    if (_originalSelectedItem >= 0 && _swappedSlot >= 0)
                     {
-                        if (_usedSelectMethod)
+                        SwapInventorySlots(player.inventory, _originalSelectedItem, _swappedSlot);
+                        if (Main.netMode != 0)
                         {
-                            // Restore using SelectItem since that's what we used to change
-                            SelectItem(player, _originalSelectedItem);
-                        }
-                        else if (_swappedSlot >= 0)
-                        {
-                            // Restore by swapping back
-                            SwapInventorySlots(player.inventory, _originalSelectedItem, _swappedSlot);
+                            NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, _originalSelectedItem);
+                            NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, _swappedSlot);
                         }
                     }
+
+                    _keepUsingItem = false;
                     _autoRevertSelectedItem = false;
                     _originalSelectedItem = -1;
                     _swappedSlot = -1;
-                    _usedSelectMethod = false;
                 }
             }
             catch { } // Silently fail item restoration - not critical
         }
 
         #endregion
+
+        public void OnContentReady(ModContext context) { }
 
         public void OnWorldLoad()
         {
@@ -531,19 +635,24 @@ namespace QuickKeys
         public void OnWorldUnload()
         {
             _rulerActive = false;
+            _keepUsingItem = false;
             _autoRevertSelectedItem = false;
             _originalSelectedItem = -1;
             _swappedSlot = -1;
-            _usedSelectMethod = false;
         }
 
         public void Unload()
         {
+            _harmony?.UnpatchAll("com.terrariamodder.quickkeys");
             FrameEvents.OnPostUpdate -= OnPostUpdate;
 
             // Reset static state for hot-reload support
             _placingTorch = false;
+            _keepUsingItem = false;
             _rulerActive = false;
+            _autoRevertSelectedItem = false;
+            _originalSelectedItem = -1;
+            _swappedSlot = -1;
 
             _log.Info("QuickKeys unloaded");
         }

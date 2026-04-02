@@ -1,25 +1,11 @@
-{
+﻿{
   "id": "admin-panel",
   "name": "Admin Panel",
-  "version": "1.2.0-hotfix",
+  "version": "2.0.0",
   "framework_version": ">=0.2.0",
   "author": "Inidar",
   "description": "Quick access to admin/cheat features with toggleable panel UI",
   "entry_dll": "AdminPanel.dll",
-  "config_schema": {
-    "enabled": {
-      "type": "bool",
-      "default": true,
-      "label": "Enabled",
-      "description": "Enable the admin panel"
-    },
-    "singleplayerOnly": {
-      "type": "bool",
-      "default": true,
-      "label": "Singleplayer Only",
-      "description": "Disable admin features in multiplayer"
-    }
-  },
   "keybinds": [
     {
       "id": "toggle",
@@ -33,5 +19,6 @@
       "description": "Toggle invincibility without opening panel",
       "default": "F9"
     }
-  ]
+  ],
+  "multiplayer": "optional"
 }

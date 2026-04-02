@@ -36,6 +36,10 @@ namespace AutoBuffs
         private static bool _initialized = false;
         private static bool _hasLoggedFirstScan = false;
 
+        // Reusable sets for scan cycle (avoid per-scan allocation)
+        private static readonly HashSet<ushort> _neededTiles = new HashSet<ushort>();
+        private static readonly HashSet<ushort> _foundTiles = new HashSet<ushort>();
+
         // Fast lookup for tile types we care about
         private static readonly HashSet<ushort> _buffTileTypes = new HashSet<ushort>
         {
@@ -57,6 +61,7 @@ namespace AutoBuffs
         {
             _tickCounter = 0;
             _hasLoggedFirstScan = false;
+            _initialized = false; // Force re-initialization on next world load
         }
 
         private static bool EnsureInitialized()
@@ -154,8 +159,8 @@ namespace AutoBuffs
             int radiusSq = scanRadius * scanRadius;
 
             // Pre-check which buffs we need
-            var neededTiles = new HashSet<ushort>();
-            var foundTiles = new HashSet<ushort>();
+            _neededTiles.Clear();
+            _foundTiles.Clear();
 
             foreach (var kvp in _tileToBuffMap)
             {
@@ -167,13 +172,13 @@ namespace AutoBuffs
                 {
                     if (buffIndex < 0)
                     {
-                        neededTiles.Add(kvp.Key);
+                        _neededTiles.Add(kvp.Key);
                     }
                     else
                     {
                         if (player.buffTime[buffIndex] <= SUGAR_RUSH_REAPPLY_THRESHOLD)
                         {
-                            neededTiles.Add(kvp.Key);
+                            _neededTiles.Add(kvp.Key);
                         }
                     }
                 }
@@ -181,22 +186,22 @@ namespace AutoBuffs
                 {
                     if (buffIndex < 0)
                     {
-                        neededTiles.Add(kvp.Key);
+                        _neededTiles.Add(kvp.Key);
                     }
                 }
             }
 
             // Early exit if no buffs needed
-            if (neededTiles.Count == 0)
+            if (_neededTiles.Count == 0)
             {
                 Mod.LogDebug("All buffs active, skipping scan");
                 return;
             }
 
-            Mod.LogDebug($"Scanning for {neededTiles.Count} buff tiles around ({playerTileX}, {playerTileY})");
+            Mod.LogDebug($"Scanning for {_neededTiles.Count} buff tiles around ({playerTileX}, {playerTileY})");
 
             // Scan tiles
-            for (int x = minX; x <= maxX && foundTiles.Count < neededTiles.Count; x++)
+            for (int x = minX; x <= maxX && _foundTiles.Count < _neededTiles.Count; x++)
             {
                 int dx = x - playerTileX;
                 int dxSq = dx * dx;
@@ -219,26 +224,26 @@ namespace AutoBuffs
                     ushort tileType = tile.type;
 
                     // Check if this is a tile we need and haven't found yet
-                    if (neededTiles.Contains(tileType) && !foundTiles.Contains(tileType))
+                    if (_neededTiles.Contains(tileType) && !_foundTiles.Contains(tileType))
                     {
-                        foundTiles.Add(tileType);
+                        _foundTiles.Add(tileType);
 
                         // Early exit if we found everything
-                        if (foundTiles.Count >= neededTiles.Count)
+                        if (_foundTiles.Count >= _neededTiles.Count)
                             break;
                     }
                 }
             }
 
             // Log first scan
-            if (!_hasLoggedFirstScan && foundTiles.Count > 0)
+            if (!_hasLoggedFirstScan && _foundTiles.Count > 0)
             {
                 _hasLoggedFirstScan = true;
-                Mod.Log($"First scan complete - found {foundTiles.Count} furniture");
+                Mod.Log($"First scan complete - found {_foundTiles.Count} furniture");
             }
 
             // Apply buffs for found tiles
-            foreach (ushort tileType in foundTiles)
+            foreach (ushort tileType in _foundTiles)
             {
                 if (_tileToBuffMap.TryGetValue(tileType, out BuffInfo info))
                 {
@@ -246,9 +251,9 @@ namespace AutoBuffs
                 }
             }
 
-            if (foundTiles.Count > 0)
+            if (_foundTiles.Count > 0)
             {
-                Mod.LogDebug($"Applied {foundTiles.Count} buffs");
+                Mod.LogDebug($"Applied {_foundTiles.Count} buffs");
             }
         }
 
@@ -258,7 +263,7 @@ namespace AutoBuffs
 
             try
             {
-                player.AddBuff(info.BuffId, duration, true);
+                player.AddBuff(info.BuffId, duration);
             }
             catch (Exception ex)
             {

@@ -186,6 +186,7 @@ namespace SeedLab
         /// </summary>
         public void SetFeature(string featureId, bool enabled)
         {
+            if (!_featureStates.ContainsKey(featureId)) return;
             _featureStates[featureId] = enabled;
             RecalculateGlobalFlags();
         }

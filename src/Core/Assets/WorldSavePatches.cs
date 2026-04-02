@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Terraria;
@@ -12,15 +13,23 @@ namespace TerrariaModder.Core.Assets
     /// Save interception for world files.
     ///
     /// Scans all world chests (Main.chest[0-7999]) for custom items.
-    /// Same pattern as player: extract → save moddata → air → vanilla save → restore.
+    /// Same pattern as player: extract → write moddata → air → vanilla save → restore.
+    ///
+    /// H1/H2: Uses new mod-keyed format at Main.SavePath/TerrariaModder/worlds/{Name}.json
+    /// H3: One-time migration from legacy .wld.moddata sidecar on first load.
+    /// H2: Preserves items from unloaded mods across saves.
     /// </summary>
     internal static class WorldSavePatches
     {
         private static Harmony _harmony;
         private static ILogger _log;
         private static bool _applied;
+        private static bool _worldItemsInjected;
 
         private static readonly Dictionary<string, Item> _extractedItems = new Dictionary<string, Item>();
+
+        // Items from unloaded mods — preserved across save/load cycles (H2)
+        private static List<ModdataFile.ItemEntry> _preservedItems = new List<ModdataFile.ItemEntry>();
 
         public static void Initialize(ILogger logger)
         {
@@ -47,18 +56,21 @@ namespace TerrariaModder.Core.Assets
 
         private static void PatchSaveWorld()
         {
-            // WorldFile.SaveWorld() or WorldFile.SaveWorld(bool useCloudSaving, bool resetTime)
             var worldFileType = typeof(Terraria.IO.WorldFile);
+            // Try all known SaveWorld signatures (varies by Terraria version)
             var saveMethod = worldFileType.GetMethod("SaveWorld",
                 BindingFlags.Public | BindingFlags.Static, null,
-                new[] { typeof(bool), typeof(bool) }, null);
+                new[] { typeof(bool), typeof(bool), typeof(bool) }, null);
 
             if (saveMethod == null)
-            {
+                saveMethod = worldFileType.GetMethod("SaveWorld",
+                    BindingFlags.Public | BindingFlags.Static, null,
+                    new[] { typeof(bool), typeof(bool) }, null);
+
+            if (saveMethod == null)
                 saveMethod = worldFileType.GetMethod("SaveWorld",
                     BindingFlags.Public | BindingFlags.Static, null,
                     Type.EmptyTypes, null);
-            }
 
             if (saveMethod == null)
             {
@@ -74,8 +86,6 @@ namespace TerrariaModder.Core.Assets
         private static void PatchLoadWorld()
         {
             var worldFileType = typeof(Terraria.IO.WorldFile);
-
-            // LoadWorld() is public static with no parameters in Terraria 1.4.5
             var loadMethod = worldFileType.GetMethod("LoadWorld",
                 BindingFlags.Public | BindingFlags.Static, null,
                 Type.EmptyTypes, null);
@@ -109,26 +119,30 @@ namespace TerrariaModder.Core.Assets
                     for (int s = 0; s < chest.item.Length; s++)
                     {
                         var item = chest.item[s];
-                        if (item == null || item.IsAir || item.type < ItemRegistry.VanillaItemCount) continue;
+                        if (item == null || item.IsAir) continue;
 
-                        string fullId = ItemRegistry.GetFullId(item.type);
-                        if (fullId == null)
+                        // Custom items (any slot) — extract to prevent vanilla save corruption
+                        if (item.type >= ItemRegistry.VanillaItemCount)
                         {
-                            _log?.Warn($"[Save] Custom item type {item.type} in chest_{c}[{s}] has no registered ID - item will be lost on save");
-                            continue;
+                            string fullId = ItemRegistry.GetFullId(item.type);
+                            if (fullId == null)
+                            {
+                                _log?.Warn($"[Save] Custom item type {item.type} in chest_{c}[{s}] has no registered ID - item will be lost on save");
+                                continue;
+                            }
+
+                            string key = $"chest_{c}:{s}";
+                            customItems.Add(new ModdataFile.ItemEntry
+                            {
+                                Location = $"chest_{c}",
+                                Slot = s,
+                                ItemId = fullId,
+                                Stack = item.stack,
+                                Prefix = item.prefix,
+                                Favorited = false
+                            });
+                            _extractedItems[key] = item;
                         }
-
-                        string key = $"chest_{c}:{s}";
-                        customItems.Add(new ModdataFile.ItemEntry
-                        {
-                            Location = $"chest_{c}",
-                            Slot = s,
-                            ItemId = fullId,
-                            Stack = item.stack,
-                            Prefix = item.prefix,
-                            Favorited = false
-                        });
-                        _extractedItems[key] = item;
                     }
                 }
 
@@ -145,8 +159,14 @@ namespace TerrariaModder.Core.Assets
                 }
 
                 string moddataPath = ModdataFile.GetWorldModdataPath(worldPath);
+                if (moddataPath == null)
+                {
+                    _log?.Warn("[WorldSavePatches] Could not determine world moddata path");
+                    RestoreAll();
+                    return;
+                }
 
-                if (customItems.Count == 0)
+                if (customItems.Count == 0 && _preservedItems.Count == 0)
                 {
                     // Delete stale moddata so deleted pending items don't reappear on next load
                     ModdataFile.Delete(moddataPath);
@@ -154,14 +174,14 @@ namespace TerrariaModder.Core.Assets
                     return;
                 }
 
-                if (!ModdataFile.Write(moddataPath, customItems))
+                if (!ModdataFile.Write(moddataPath, customItems, _preservedItems))
                 {
                     _log?.Error("[WorldSavePatches] Failed to write moddata");
                     RestoreAll();
                     return;
                 }
 
-                // Replace with air
+                // Replace extracted items with air so vanilla save doesn't see them
                 foreach (var kvp in _extractedItems)
                 {
                     var parts = kvp.Key.Split(':');
@@ -170,8 +190,8 @@ namespace TerrariaModder.Core.Assets
                     int chestIdx = int.Parse(chestKey.Substring(6)); // after "chest_"
                     Main.chest[chestIdx].item[slot] = new Item();
                 }
-
-                _log?.Info($"[WorldSavePatches] Extracted {customItems.Count} custom items from chests");
+                _log?.Info($"[WorldSavePatches] Extracted {customItems.Count} items from chests" +
+                    (_preservedItems.Count > 0 ? $" ({_preservedItems.Count} preserved from unloaded mods)" : ""));
             }
             catch (Exception ex)
             {
@@ -205,14 +225,41 @@ namespace TerrariaModder.Core.Assets
 
         private static void LoadWorld_Postfix()
         {
+            if (_worldItemsInjected)
+            {
+                _log?.Debug("[WorldSavePatches] Skipping duplicate injection — items already injected for this world load");
+                return;
+            }
+
             try
             {
                 string worldPath = GetCurrentWorldPath();
-                if (worldPath == null) return;
+                if (worldPath == null) { _worldItemsInjected = true; return; }
 
-                string moddataPath = ModdataFile.GetWorldModdataPath(worldPath);
-                var items = ModdataFile.Read(moddataPath);
-                if (items.Count == 0) return;
+                // H3: One-time migration from legacy sidecar
+                string v2Path = ModdataFile.GetWorldModdataPath(worldPath);
+                string v1Path = ModdataFile.GetLegacyWorldModdataPath(worldPath);
+                if (v2Path != null && v1Path != null)
+                    ModdataFile.MigrateIfNeeded(v2Path, v1Path);
+
+                if (v2Path == null) { _worldItemsInjected = true; return; }
+
+                // Get loaded mod IDs
+                var loadedModIds = new HashSet<string>(
+                    ItemRegistry.AllIds.Select(id =>
+                    {
+                        int c = id.IndexOf(':');
+                        return c > 0 ? id.Substring(0, c) : null;
+                    }).Where(m => m != null),
+                    StringComparer.OrdinalIgnoreCase);
+
+                var items = ModdataFile.Read(v2Path, loadedModIds, out var preserved);
+                _preservedItems = preserved ?? new List<ModdataFile.ItemEntry>();
+
+                if (_preservedItems.Count > 0)
+                    _log?.Info($"[WorldSavePatches] Preserving {_preservedItems.Count} item(s) from unloaded mod(s)");
+
+                if (items.Count == 0) { _worldItemsInjected = true; return; }
 
                 // Clear previous pending world items
                 PendingItemStore.ClearWorld();
@@ -247,8 +294,25 @@ namespace TerrariaModder.Core.Assets
                         if (!int.TryParse(entry.Location.Substring(6), out int chestIdx)) { skipped++; continue; }
                         if (chestIdx < 0 || chestIdx >= Main.maxChests || Main.chest[chestIdx]?.item == null) { skipped++; continue; }
 
-                        int runtimeType = ItemRegistry.GetRuntimeType(entry.ItemId);
-                        if (runtimeType < 0) { skipped++; continue; }
+                        int runtimeType;
+                        bool isVanillaOverflow = entry.ItemId.StartsWith("vanilla:");
+
+                        if (isVanillaOverflow)
+                        {
+                            // Vanilla overflow item: "vanilla:{typeId}"
+                            if (!int.TryParse(entry.ItemId.Substring(8), out runtimeType) || runtimeType <= 0)
+                            { skipped++; continue; }
+                        }
+                        else
+                        {
+                            runtimeType = ItemRegistry.GetRuntimeType(entry.ItemId);
+                            if (runtimeType < 0) { skipped++; continue; }
+
+                            // Log alias resolution
+                            string resolvedId = ItemRegistry.GetFullId(runtimeType);
+                            if (resolvedId != null && !string.Equals(resolvedId, entry.ItemId, StringComparison.OrdinalIgnoreCase))
+                                _log?.Info($"[Moddata] Resolved alias \"{entry.ItemId}\" → \"{resolvedId}\"");
+                        }
 
                         var item = new Item();
                         item.SetDefaults(runtimeType);
@@ -300,11 +364,35 @@ namespace TerrariaModder.Core.Assets
                 }
 
                 _log?.Info($"[WorldSavePatches] Injected {injected} items into chests, skipped {skipped}");
+                _worldItemsInjected = true;
             }
             catch (Exception ex)
             {
                 _log?.Error($"[WorldSavePatches] Load postfix error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Re-inject custom items from world sidecar if they're missing from chests.
+        /// Called from OnWorldLoad events as a safety net — on the H&P server, LoadWorld runs
+        /// before Harmony patches are applied, so LoadWorld_Postfix never fires. This method
+        /// provides the same injection, callable at any time after world load.
+        /// Idempotent: guarded by _worldItemsInjected flag to prevent duplicate injection.
+        /// </summary>
+        public static void EnsureWorldItemsInjected()
+        {
+            LoadWorld_Postfix();
+        }
+
+        /// <summary>
+        /// Reset world load injection state. Must be called on every world exit
+        /// (singleplayer SaveAndQuit AND multiplayer disconnect) so the next world
+        /// load can inject items fresh.
+        /// </summary>
+        public static void OnWorldUnload()
+        {
+            _worldItemsInjected = false;
+            _preservedItems.Clear();
         }
 
         // ── Helpers ──

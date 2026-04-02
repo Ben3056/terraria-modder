@@ -13,6 +13,7 @@ using TerrariaModder.Core.Events;
 using TerrariaModder.Core.Input;
 using TerrariaModder.Core.Logging;
 using TerrariaModder.Core.Manifest;
+using TerrariaModder.Core.Net;
 using TerrariaModder.Core.Patches;
 using TerrariaModder.Core.UI;
 
@@ -56,12 +57,56 @@ namespace TerrariaModder.Core
     }
 
     /// <summary>
-    /// Harmony patch that triggers plugin loading when Terraria.Main initializes.
+    /// Harmony patch that triggers plugin loading when Terraria.Main is constructed.
+    /// Uses TargetMethods() instead of [HarmonyPatch(typeof(Main))] because typeof(Main)
+    /// resolves to Terraria.exe's Main at compile time. When running TerrariaServer.exe
+    /// (loaded via Assembly.UnsafeLoadFrom into the LoadFrom context), that is a different
+    /// type identity and the attribute-based patch never fires. Scanning AppDomain at
+    /// PatchAll() time finds the actual loaded game type regardless of load context.
+    /// IsDedicatedServer is read from the TERRARIA_MODDER_DEDSERV env var (set by injector
+    /// before mod loading), so it is reliable even before Main.dedServ is set by DedServ().
     /// </summary>
-    [HarmonyPatch(typeof(Main))]
-    [HarmonyPatch(MethodType.Constructor)]
+    [HarmonyPatch]
     internal static class MainInitPatch
     {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            var result = new List<MethodBase>();
+            var seen = new System.Collections.Generic.HashSet<MethodBase>();
+            var dbg = new System.Text.StringBuilder("TargetMethods scan:\n");
+
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type mainType = null;
+                try { mainType = assembly.GetType("Terraria.Main"); }
+                catch (Exception ex) { dbg.AppendLine($"  {assembly.GetName().Name}: GetType threw {ex.GetType().Name}: {ex.Message}"); }
+                if (mainType == null) continue;
+                dbg.AppendLine($"  Found Terraria.Main in {assembly.GetName().Name}");
+                ConstructorInfo ctor = null;
+                try { ctor = AccessTools.Constructor(mainType); } catch { }
+                if (ctor != null && seen.Add(ctor))
+                {
+                    dbg.AppendLine($"    ctor added");
+                    result.Add(ctor);
+                }
+            }
+
+            // Fallback: compile-time typeof(Main) reference (covers case where GetType fails above)
+            try
+            {
+                var ctor = AccessTools.Constructor(typeof(Main));
+                if (ctor != null && seen.Add(ctor))
+                {
+                    dbg.AppendLine($"  Fallback typeof(Main) ctor added");
+                    result.Add(ctor);
+                }
+            }
+            catch (Exception ex) { dbg.AppendLine($"  Fallback typeof(Main) threw: {ex.GetType().Name}: {ex.Message}"); }
+
+            dbg.AppendLine($"Total: {result.Count} ctors");
+            return result;
+        }
+
         [HarmonyPostfix]
         public static void Postfix()
         {
@@ -132,11 +177,48 @@ namespace TerrariaModder.Core
     {
         public const string FrameworkVersion = "0.2.0";
 
+        // Static constructor — runs once, before any other PluginLoader code.
+        // Installs global unhandled exception handler so Windows error dialogs
+        // are captured in the log file (they're otherwise invisible to automation).
+        static PluginLoader()
+        {
+            AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
+            {
+                try
+                {
+                    var ex = args.ExceptionObject as Exception;
+                    var msg = ex != null
+                        ? $"UNHANDLED EXCEPTION (isTerminating={args.IsTerminating}): {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"
+                        : $"UNHANDLED EXCEPTION (isTerminating={args.IsTerminating}): {args.ExceptionObject}";
+                    _log?.Error(msg);
+                    // Also write to a crash file in case the logger is dead
+                    try
+                    {
+                        var crashPath = Path.Combine(
+                            Path.GetDirectoryName(typeof(PluginLoader).Assembly.Location) ?? ".",
+                            "crash.log");
+                        File.AppendAllText(crashPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n");
+                    }
+                    catch { }
+                }
+                catch { }
+            };
+        }
+
         private static bool _initialized = false;
         private static readonly List<ModInfo> _mods = new List<ModInfo>();
         private static readonly Dictionary<string, ModInfo> _modsById = new Dictionary<string, ModInfo>();
         private static ILogger _log;
         private static bool _iconsLoaded;
+
+        /// <summary>
+        /// True if running as TerrariaServer.exe (dedicated server).
+        /// Reads the TERRARIA_MODDER_DEDSERV env var set by TerrariaInjector at startup.
+        /// Does NOT fall back to Main.dedServ — accessing Main on TerrariaServer.exe can
+        /// trigger TypeInitializationException if Main's cctor hasn't completed.
+        /// </summary>
+        public static bool IsDedicatedServer =>
+            Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1";
 
         /// <summary>
         /// Get list of all discovered mods.
@@ -200,36 +282,84 @@ namespace TerrariaModder.Core
         /// </summary>
         public static void LoadPlugins()
         {
-            if (_initialized) return;
+                if (_initialized) return;
 
             try
             {
-                // Initialize logging first
+                // Initialize logging first (set dedicated-server flag before Initialize)
+                LogManager.IsDedicatedServer = IsDedicatedServer;
                 LogManager.Initialize();
                 _log = LogManager.Core;
 
                 // Guard against CaptureManager crash (must be before Main.Initialize)
                 CaptureManagerGuard.Apply(_log);
 
-                // Initialize keybind system
-                KeybindManager.Initialize(_log);
-                KeybindUpdatePatch.Initialize(_log);
+                // Note: libPath is no longer cleared here. The HostAndPlay_Prefix patch in EventPatches
+                // replaces the server spawn to use TerrariaInjector.exe directly, bypassing -loadlib entirely.
+                // The server process loads mods through the injector's normal bootstrap, ensuring tileContainer
+                // and all mod state is correctly initialized on the server.
 
-                // Initialize events system
-                EventPatches.Initialize(_log);
-
-                // Initialize custom assets system
+                // Initialize asset system on both client and server — internal gating applies (F1)
                 AssetSystem.Initialize(_log);
 
-                // Initialize UI color system (must be before ModMenu)
-                UIColors.Initialize(CoreConfig.Instance.CorePath, _log);
+                if (!IsDedicatedServer)
+                {
+                    // Client / Host & Play: initialize input, UI, and render systems
+                    KeybindManager.Initialize(_log);
+                    KeybindUpdatePatch.Initialize(_log);
+                    EventPatches.Initialize(_log);
+                    UIColors.Initialize(CoreConfig.Instance.CorePath, _log);
+                    ModMenu.Initialize(_log);
+                }
+                else
+                {
+                    // Dedicated server: load server config and activate console command intercept
+                    _log.Info("[Server] Running as dedicated server — UI systems skipped");
+                    Server.ServerConfig.Load(CoreConfig.Instance.CorePath);
+                }
 
-                // Initialize mod menu (UI)
-                ModMenu.Initialize(_log);
-
-                // Initialize command registry
+                // Initialize command registry (always — used by both server console and client debug console)
                 CommandRegistry.Initialize(_log);
                 RegisterBuiltInCommands();
+
+                // Initialize identity and permission systems
+                var coreConfig = CoreConfig.Instance;
+                Identity.IdentityService.Initialize(coreConfig.CorePath, _log);
+                Permissions.PermissionService.Initialize(coreConfig.CorePath, _log);
+                Net.ServerCommandDispatch.Initialize(_log);
+                Server.DedServProxy.Initialize(_log);
+
+                if (IsDedicatedServer)
+                {
+                    // Start server console command intercept after CommandRegistry is ready
+                    Server.ServerConsole.Initialize(_log);
+                    Server.PlayerDataStore.Initialize(_log, coreConfig.CorePath);
+                    Server.ServerModdataStore.Initialize(_log, coreConfig.CorePath);
+
+                    // Start HTTP management API early so mods can be monitored during load
+                    var srvConfig = Server.ServerConfig.Instance;
+                    if (srvConfig != null && !string.IsNullOrEmpty(srvConfig.ManagementApiKey))
+                    {
+                        try
+                        {
+                            _managementApi = new Server.ServerManagementApi(_log, srvConfig);
+                            _managementApi.Start();
+                        }
+                        catch (Exception ex)
+                        {
+                            _log?.Error($"[ServerManagementApi] Failed to start: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        _log?.Info("[ServerManagementApi] Not started — ManagementApiKey not set in server-config.json");
+                    }
+                }
+
+                // Initialize net sync (packet intercept for multiplayer config sync)
+                NetSync.Initialize(_log);
+                var netHarmony = new Harmony("com.terrariamodder.netsync");
+                NetSyncPatches.Apply(netHarmony, _log);
 
                 _log.Info("=== TerrariaModder Framework v" + FrameworkVersion + " ===");
                 _log.Info("Starting plugin discovery...");
@@ -246,6 +376,11 @@ namespace TerrariaModder.Core
                     Directory.CreateDirectory(pluginsDir);
                 }
 
+                // Suppress console output on dedicated server during mod loading
+                // to avoid flooding the interactive world selection prompt
+                if (IsDedicatedServer)
+                    LogManager.SuppressConsole = true;
+
                 // Phase 1: Discover mods
                 DiscoverMods(pluginsDir);
 
@@ -255,7 +390,21 @@ namespace TerrariaModder.Core
                 // Phase 3: Load mods in dependency order
                 LoadMods();
 
+                if (IsDedicatedServer)
+                {
+                    // Apply server-safe asset patches AFTER mods load — mods register custom items
+                    // in their Initialize(), so ApplyPatches() (which assigns type IDs) must run
+                    // after all mod Initialize() calls complete. OnGameReady is not called for
+                    // TerrariaServer.exe, so we call both here manually.
+                    AssetSystem.ApplyPatches();
+                    DispatchOnContentReady();
+                }
+
                 _initialized = true;
+
+                // On dedicated server, keep console suppressed — mod logs go to file only.
+                // ServerConsole writes directly to Console and is not affected by this flag.
+                // This prevents mod log spam from flooding the interactive world selection prompt.
 
                 // Summary
                 int loaded = _mods.Count(m => m.State == ModState.Loaded);
@@ -485,14 +634,83 @@ namespace TerrariaModder.Core
         }
 
         /// <summary>
+        /// Read the per-instance enabled-mods file from the core folder.
+        /// Returns null if no file exists (meaning all mods are enabled).
+        /// Checks enabled-mods.server.json or enabled-mods.client.json first, then enabled-mods.json.
+        /// File format: JSON array of mod IDs, e.g. ["skip-intro", "quick-keys"]
+        /// </summary>
+        private static HashSet<string> GetEnabledModIds(string corePath)
+        {
+            bool isServer = IsDedicatedServer;
+            string scopedFile = Path.Combine(corePath, isServer ? "enabled-mods.server.json" : "enabled-mods.client.json");
+            string unifiedFile = Path.Combine(corePath, "enabled-mods.json");
+
+            string filePath = File.Exists(scopedFile) ? scopedFile
+                            : File.Exists(unifiedFile) ? unifiedFile
+                            : null;
+
+            if (filePath == null) return null; // no file = all mods enabled
+
+            try
+            {
+                string json = File.ReadAllText(filePath);
+                var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // Parse simple JSON string array: ["id1", "id2", ...]
+                int i = 0;
+                while (i < json.Length)
+                {
+                    // Find opening quote
+                    while (i < json.Length && json[i] != '"') i++;
+                    if (i >= json.Length) break;
+                    i++; // skip opening quote
+
+                    // Read until closing quote
+                    var sb = new System.Text.StringBuilder();
+                    while (i < json.Length && json[i] != '"')
+                    {
+                        if (json[i] == '\\' && i + 1 < json.Length)
+                            i++; // skip escape
+                        sb.Append(json[i++]);
+                    }
+                    i++; // skip closing quote
+
+                    string id = sb.ToString();
+                    if (!string.IsNullOrEmpty(id))
+                        ids.Add(id);
+                }
+
+                _log.Info($"[PluginLoader] Instance mod filter: {filePath} ({ids.Count} enabled)");
+                return ids;
+            }
+            catch (Exception ex)
+            {
+                _log.Warn($"[PluginLoader] Failed to read enabled-mods file {filePath}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Load all mods in dependency order.
+        /// Skips mods not present in the per-instance enabled-mods file (if it exists).
         /// </summary>
         private static void LoadMods()
         {
+            var config = CoreConfig.Instance;
+            HashSet<string> enabledIds = GetEnabledModIds(config.CorePath);
+
             foreach (var modInfo in _mods)
             {
                 // Only load mods that are still in Discovered state
                 if (modInfo.State != ModState.Discovered) continue;
+
+                // Per-instance activation filter
+                if (enabledIds != null && !enabledIds.Contains(modInfo.Manifest.Id))
+                {
+                    modInfo.State = ModState.Disabled;
+                    _log.Info($"[PluginLoader] Mod disabled by instance filter: {modInfo.Manifest.Id}");
+                    continue;
+                }
 
                 LoadMod(modInfo);
             }
@@ -560,19 +778,13 @@ namespace TerrariaModder.Core
                     _log.Warn($"[{manifest.Id}] Mod ID mismatch: manifest says '{manifest.Id}', class says '{mod.Id}'");
                 }
 
-                // Create config if schema exists
-                IModConfig config = null;
-                if (!string.IsNullOrEmpty(manifest.ConfigSchemaJson))
-                {
-                    var logger2 = LogManager.GetLogger(manifest.Id);
-                    var schema = ConfigSchema.Parse(manifest.ConfigSchemaJson, logger2);
-                    var configPath = Path.Combine(manifest.FolderPath, "config.json");
-                    config = new ModConfig(manifest.Id, configPath, schema, logger2);
-                }
+                // Create config from ModConfig subclass in assembly (if any)
+                var logger = LogManager.GetLogger(manifest.Id);
+                var coreConfig = CoreConfig.Instance;
+                var modConfig = ConfigManager.LoadForMod(manifest.Id, assembly, coreConfig.ConfigsPath, manifest.FolderPath, logger);
 
                 // Create context
-                var logger = LogManager.GetLogger(manifest.Id);
-                var context = new ModContext(logger, manifest.FolderPath, manifest, config);
+                var context = new ModContext(logger, manifest.FolderPath, manifest, modConfig);
 
                 // Initialize
                 _log.Info($"Initializing: {manifest.Name}");
@@ -604,13 +816,32 @@ namespace TerrariaModder.Core
         }
 
         /// <summary>
+        /// Returns true if a mod with the given ID is currently loaded.
+        /// Used by ModContext.IsModLoaded() for cross-mod capability checks.
+        /// </summary>
+        public static bool IsModLoaded(string modId)
+        {
+            if (string.IsNullOrEmpty(modId)) return false;
+            return _mods.Any(m => m.State == ModState.Loaded &&
+                string.Equals(m.Manifest?.Id, modId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
         /// Call OnWorldLoad on all loaded mods.
         /// </summary>
         public static void NotifyWorldLoad()
         {
             foreach (var modInfo in _mods.Where(m => m.State == ModState.Loaded))
             {
-                SafeCall(modInfo, () => modInfo.Instance.OnWorldLoad(), "OnWorldLoad");
+                if (modInfo.Instance is IModLifecycle lc)
+                    SafeCall(modInfo, () => lc.OnWorldLoad(), "OnWorldLoad");
+            }
+
+            // Show one-time notification if any mods failed to load
+            int errorCount = _mods.Count(m => m.State == ModState.Errored);
+            if (errorCount > 0)
+            {
+                try { Terraria.Main.NewText($"[TerrariaModder] {errorCount} mod(s) failed to load \u2014 press F6 for details.", 255, 80, 80); } catch { }
             }
         }
 
@@ -619,9 +850,13 @@ namespace TerrariaModder.Core
         /// </summary>
         public static void NotifyWorldUnload()
         {
+            // I6: Clear KnownUnknown type IDs on world exit — they are per-server session
+            Assets.ItemRegistry.ClearKnownUnknowns();
+
             foreach (var modInfo in _mods.Where(m => m.State == ModState.Loaded))
             {
-                SafeCall(modInfo, () => modInfo.Instance.OnWorldUnload(), "OnWorldUnload");
+                if (modInfo.Instance is IModLifecycle lc)
+                    SafeCall(modInfo, () => lc.OnWorldUnload(), "OnWorldUnload");
             }
         }
 
@@ -642,22 +877,23 @@ namespace TerrariaModder.Core
 
                     SafeCall(modInfo, () => modInfo.Instance.Unload(), "Unload");
 
-                    // Dispose config to release FileSystemWatcher
-                    if (modInfo.Context?.Config is IDisposable disposableConfig)
-                    {
-                        try { disposableConfig.Dispose(); }
-                        catch (Exception ex) { _log?.Debug($"Config dispose error for {modInfo.Manifest.Id}: {ex.Message}"); }
-                    }
+                    // Config is no longer disposable (no FileSystemWatcher)
                 }
             }
 
             _mods.Clear();
             _modsById.Clear();
             _initialized = false;
+
+            // Stop management API if running
+            try { _managementApi?.Dispose(); _managementApi = null; } catch { }
+
             _log?.Info("All mods unloaded");
         }
 
         // ---- Lifecycle hooks (called by injector via reflection) ----
+
+        private static Server.ServerManagementApi _managementApi;
 
         /// <summary>
         /// Called by injector when Main.Initialize() completes.
@@ -666,6 +902,36 @@ namespace TerrariaModder.Core
         public static void OnGameReady()
         {
             _log?.Info("Lifecycle: OnGameReady — applying deferred patches");
+
+            // Start HTTP management API for dedicated server (if key configured)
+            // Skip if already started during LoadPlugins()
+            if (IsDedicatedServer)
+            {
+                if (_managementApi != null)
+                {
+                    _log?.Info("[ServerManagementApi] Already running — skipping duplicate start");
+                    return;
+                }
+
+                var srvConfig = Server.ServerConfig.Instance;
+                if (srvConfig != null && !string.IsNullOrEmpty(srvConfig.ManagementApiKey))
+                {
+                    try
+                    {
+                        _managementApi = new Server.ServerManagementApi(_log, srvConfig);
+                        _managementApi.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        _log?.Error($"[ServerManagementApi] Failed to start: {ex.Message}");
+                    }
+                }
+                else
+                {
+                    _log?.Info("[ServerManagementApi] Not started — ManagementApiKey not set in server-config.json");
+                }
+                return;
+            }
 
             try
             {
@@ -688,6 +954,9 @@ namespace TerrariaModder.Core
                 _log?.Error($"[Lifecycle] EventPatches/AssetSystem failed: {ex.Message}");
             }
 
+            // Dispatch OnContentReady — runtime type IDs are assigned, cross-mod lookups are valid.
+            DispatchOnContentReady();
+
             // Inject textures here — OnContentLoaded fires BEFORE OnGameReady because
             // XNA calls LoadContent() from within Initialize(). By this point ApplyPatches()
             // has set _patchesApplied=true and GraphicsDevice is ready (LoadContent completed).
@@ -699,6 +968,7 @@ namespace TerrariaModder.Core
             {
                 _log?.Error($"[Lifecycle] Texture injection failed: {ex.Message}");
             }
+
         }
 
         /// <summary>
@@ -739,6 +1009,19 @@ namespace TerrariaModder.Core
         {
             _log?.Info("Lifecycle: OnShutdown — unloading mods");
             Unload();
+        }
+
+        /// <summary>
+        /// Dispatch IModLifecycle.OnContentReady to all loaded mods that implement it.
+        /// Called from Initialize() for dedicated server and from OnGameReady() for client.
+        /// </summary>
+        private static void DispatchOnContentReady()
+        {
+            foreach (var modInfo in _mods.Where(m => m.State == ModState.Loaded))
+            {
+                if (modInfo.Instance is IModLifecycle lc)
+                    SafeCall(modInfo, () => lc.OnContentReady(modInfo.Context), "OnContentReady");
+            }
         }
 
         /// <summary>
@@ -789,79 +1072,82 @@ namespace TerrariaModder.Core
         /// </summary>
         private static void RegisterBuiltInCommands()
         {
-            CommandRegistry.Register("help", "List all commands, or show help for a specific command. Usage: help [command]", args =>
+            // On dedicated server, skip "help", "mods", and "config" — ServerConsole registers its own
+            // versions that write to Console.WriteLine instead of CommandRegistry.Write.
+            if (!IsDedicatedServer)
             {
-                if (args.Length > 0)
+                CommandRegistry.Register("help", "List all commands, or show help for a specific command. Usage: help [command]", args =>
                 {
-                    var desc = CommandRegistry.GetHelp(args[0]);
-                    if (desc != null)
-                        CommandRegistry.Write($"{args[0]}: {desc}");
-                    else
-                        CommandRegistry.Write($"Unknown command: {args[0]}");
-                }
-                else
-                {
-                    var commands = CommandRegistry.GetCommands();
-                    CommandRegistry.Write($"{commands.Count} command(s) available:");
-                    foreach (var cmd in commands)
+                    if (args.Length > 0)
                     {
-                        string prefix = cmd.ModId != null ? $"[{cmd.ModId}] " : "";
-                        CommandRegistry.Write($"  {cmd.Name} - {prefix}{cmd.Description}");
+                        var desc = CommandRegistry.GetHelp(args[0]);
+                        if (desc != null)
+                            CommandRegistry.Write($"{args[0]}: {desc}");
+                        else
+                            CommandRegistry.Write($"Unknown command: {args[0]}");
                     }
-                }
-            });
-
-            CommandRegistry.Register("mods", "List loaded mods with status", args =>
-            {
-                CommandRegistry.Write($"{_mods.Count} mod(s) discovered:");
-                foreach (var mod in _mods)
+                    else
+                    {
+                        var commands = CommandRegistry.GetCommands();
+                        CommandRegistry.Write($"{commands.Count} command(s) available:");
+                        foreach (var cmd in commands)
+                        {
+                            string prefix = cmd.ModId != null ? $"[{cmd.ModId}] " : "";
+                            CommandRegistry.Write($"  {cmd.Name} - {prefix}{cmd.Description}");
+                        }
+                    }
+                });
+                CommandRegistry.Register("mods", "List loaded mods with status", args =>
                 {
-                    string status = mod.State.ToString();
-                    string version = mod.Manifest.Version ?? "?";
-                    string extra = "";
-                    if (mod.State == ModState.Errored)
-                        extra = $" - {mod.ErrorMessage}";
-                    else if (mod.State == ModState.DependencyError)
-                        extra = $" - {mod.ErrorMessage}";
-                    else if (!string.IsNullOrEmpty(mod.VersionWarning))
-                        extra = $" - {mod.VersionWarning}";
+                    CommandRegistry.Write($"{_mods.Count} mod(s) discovered:");
+                    foreach (var mod in _mods)
+                    {
+                        string status = mod.State.ToString();
+                        string version = mod.Manifest.Version ?? "?";
+                        string extra = "";
+                        if (mod.State == ModState.Errored)
+                            extra = $" - {mod.ErrorMessage}";
+                        else if (mod.State == ModState.DependencyError)
+                            extra = $" - {mod.ErrorMessage}";
+                        else if (!string.IsNullOrEmpty(mod.VersionWarning))
+                            extra = $" - {mod.VersionWarning}";
 
-                    CommandRegistry.Write($"  {mod.Manifest.Id} v{version} [{status}]{extra}");
-                }
-            });
+                        CommandRegistry.Write($"  {mod.Manifest.Id} v{version} [{status}]{extra}");
+                    }
+                });
 
-            CommandRegistry.Register("config", "Show config values for a mod. Usage: config <mod-id>", args =>
-            {
-                if (args.Length == 0)
+                CommandRegistry.Register("config", "Show config values for a mod. Usage: config <mod-id>", args =>
                 {
-                    CommandRegistry.Write("Usage: config <mod-id>");
-                    return;
-                }
+                    if (args.Length == 0)
+                    {
+                        CommandRegistry.Write("Usage: config <mod-id>");
+                        return;
+                    }
 
-                string modId = args[0];
-                var modInfo = GetMod(modId);
-                if (modInfo == null)
-                {
-                    CommandRegistry.Write($"Mod not found: {modId}");
-                    return;
-                }
+                    string modId = args[0];
+                    var modInfo = GetMod(modId);
+                    if (modInfo == null)
+                    {
+                        CommandRegistry.Write($"Mod not found: {modId}");
+                        return;
+                    }
 
-                var config = modInfo.Context?.Config;
-                if (config == null)
-                {
-                    CommandRegistry.Write($"{modId} has no configuration");
-                    return;
-                }
+                    var config = modInfo.Context?.Config;
+                    if (config == null)
+                    {
+                        CommandRegistry.Write($"{modId} has no configuration");
+                        return;
+                    }
 
-                CommandRegistry.Write($"{modId} configuration ({config.FilePath}):");
-                foreach (var field in config.Schema)
-                {
-                    object value;
-                    try { value = config.Get<object>(field.Key); }
-                    catch (Exception ex) { value = $"(error: {ex.Message})"; }
-                    CommandRegistry.Write($"  {field.Key} = {value} (default: {field.Value.Default})");
-                }
-            });
+                    CommandRegistry.Write($"{modId} configuration v{config.Version} ({config.FilePath}):");
+                    foreach (var meta in config.GetPropertyMetadata())
+                    {
+                        object value = meta.GetValue(config);
+                        string scope = meta.Scope == Config.ConfigScope.Server ? "[Server]" : "[Client]";
+                        CommandRegistry.Write($"  {scope} {meta.Key} = {value}");
+                    }
+                });
+            }
 
             CommandRegistry.Register("clear", "Clear console output", args =>
             {
@@ -897,8 +1183,12 @@ namespace TerrariaModder.Core
         private static string _updateVersion = ""; // Set via GitHub API check
         private static string _updateUrl = "https://www.nexusmods.com/terraria/mods/135";
 
+        // Optional warning display: show in-world chat once after connecting
+        private static bool _optionalWarningShown = false;
+
         /// <summary>
         /// Draw title screen overlay showing framework version and warnings.
+        /// Also handles the mod mismatch block screen and optional warning display.
         /// </summary>
         private static void DrawTitleScreenOverlay()
         {
@@ -908,7 +1198,35 @@ namespace TerrariaModder.Core
                 var gameMenuField = typeof(Main).GetField("gameMenu", BindingFlags.Public | BindingFlags.Static);
                 if (gameMenuField == null) return;
                 bool gameMenu = (bool)gameMenuField.GetValue(null);
+
+                // Show optional warning in chat once when we first enter a world
+                if (!gameMenu && !_optionalWarningShown && ModListMismatch.OptionalWarning != null)
+                {
+                    _optionalWarningShown = true;
+                    try
+                    {
+                        var newText = typeof(Main).GetMethod("NewText",
+                            BindingFlags.Public | BindingFlags.Static, null,
+                            new[] { typeof(string), typeof(byte), typeof(byte), typeof(byte) }, null);
+                        newText?.Invoke(null, new object[] { ModListMismatch.OptionalWarning, (byte)255, (byte)165, (byte)0 });
+                    }
+                    catch { }
+                }
+
+                // Reset optional warning shown flag when returning to menu
+                if (gameMenu && _optionalWarningShown)
+                {
+                    _optionalWarningShown = false;
+                }
+
                 if (!gameMenu) return;
+
+                // Show mod mismatch block overlay when client was disconnected due to missing required mods
+                if (ModListMismatch.IsBlocked)
+                {
+                    DrawModMismatchOverlay();
+                    return; // Don't draw the normal version panel on top
+                }
 
                 // Get warnings
                 var warnings = GetModsWithVersionWarnings().ToList();
@@ -959,8 +1277,12 @@ namespace TerrariaModder.Core
 
                 // Draw version and mod count
                 int loadedCount = _mods.Count(m => m.State == ModState.Loaded);
-                string statusText = $"TerrariaModder v{FrameworkVersion} - {loadedCount} mods loaded";
-                UIRenderer.DrawText(statusText, x + padding, headerY, UIColors.Info);
+                int errorCount = _mods.Count(m => m.State == ModState.Errored || m.State == ModState.DependencyError);
+                string statusText = errorCount > 0
+                    ? $"TerrariaModder v{FrameworkVersion} - {loadedCount} mods loaded ({errorCount} error)"
+                    : $"TerrariaModder v{FrameworkVersion} - {loadedCount} mods loaded";
+                UIRenderer.DrawText(statusText, x + padding, headerY, errorCount > 0 ? UIColors.Error : UIColors.Info);
+                UIRenderer.DrawTextSmall("Press F6 for Mod Menu", x + padding, headerY + 18, UIColors.TextDim);
 
                 // Draw update notification if available
                 if (_updateAvailable)
@@ -1076,6 +1398,89 @@ namespace TerrariaModder.Core
                 _log?.Warn($"[TitleOverlay] Render error (will not retry): {ex.Message}");
                 FrameEvents.OnUIOverlay -= DrawTitleScreenOverlay;
             }
+        }
+
+        /// <summary>
+        /// Draw the mod mismatch error overlay on the title screen.
+        /// Shown after a client is disconnected due to missing required mods.
+        /// </summary>
+        private static void DrawModMismatchOverlay()
+        {
+            const int x = 12;
+            const int y = 34;
+            const int panelWidth = 440;
+            const int padding = 12;
+
+            string reason = ModListMismatch.BlockedReason ?? "Missing required mod(s)";
+
+            // Wrap reason text at ~50 chars per line
+            var lines = WrapText(reason, 50);
+            int panelHeight = 80 + lines.Count * 20 + 44;
+
+            UIRenderer.DrawRect(x, y, panelWidth, panelHeight, UIColors.PanelBg);
+            UIRenderer.DrawRectOutline(x, y, panelWidth, panelHeight, UIColors.Error, 2);
+
+            int textY = y + padding;
+            UIRenderer.DrawText("Connection blocked — mod mismatch", x + padding, textY, UIColors.Error);
+            textY += 24;
+
+            foreach (string line in lines)
+            {
+                UIRenderer.DrawText(line, x + padding, textY, UIColors.TextDim);
+                textY += 20;
+            }
+
+            textY += 8;
+            UIRenderer.DrawText("Get mods at nexusmods.com/terraria/mods/159", x + padding, textY, UIColors.TextHint);
+            textY += 22;
+
+            // "Get Mods" button
+            int btnWidth = 110;
+            int btnHeight = 28;
+            bool btnHover = UIRenderer.IsMouseOver(x + padding, textY, btnWidth, btnHeight);
+            UIRenderer.DrawRect(x + padding, textY, btnWidth, btnHeight, btnHover ? UIColors.ButtonHover : UIColors.Button);
+            UIRenderer.DrawRectOutline(x + padding, textY, btnWidth, btnHeight, UIColors.Error, 1);
+            UIRenderer.DrawText("Get Mods", x + padding + 12, textY + 6, UIColors.Text);
+
+            if (btnHover && UIRenderer.MouseLeftClick)
+            {
+                ModListMismatch.Clear();
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "https://www.nexusmods.com/terraria/mods/159",
+                        UseShellExecute = true
+                    });
+                }
+                catch { }
+            }
+
+            // "Dismiss" button
+            int dismissX = x + padding + btnWidth + 8;
+            bool dismissHover = UIRenderer.IsMouseOver(dismissX, textY, btnWidth, btnHeight);
+            UIRenderer.DrawRect(dismissX, textY, btnWidth, btnHeight, dismissHover ? UIColors.ButtonHover : UIColors.Button);
+            UIRenderer.DrawRectOutline(dismissX, textY, btnWidth, btnHeight, UIColors.Border, 1);
+            UIRenderer.DrawText("Dismiss", dismissX + 18, textY + 6, UIColors.Text);
+
+            if (dismissHover && UIRenderer.MouseLeftClick)
+                ModListMismatch.Clear();
+        }
+
+        private static List<string> WrapText(string text, int maxChars)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrEmpty(text)) return result;
+
+            while (text.Length > maxChars)
+            {
+                int cut = text.LastIndexOf(' ', maxChars);
+                if (cut <= 0) cut = maxChars;
+                result.Add(text.Substring(0, cut));
+                text = text.Substring(cut).TrimStart();
+            }
+            if (text.Length > 0) result.Add(text);
+            return result;
         }
     }
 }

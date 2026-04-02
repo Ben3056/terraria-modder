@@ -18,6 +18,9 @@ namespace WhipStacking
         private static FieldInfo _effectField;
         private static MethodInfo _typeSetter;
 
+        // maxNPCs cached via reflection — avoid compile-time Main ref which triggers XNA cctor on dedServ
+        private static int _maxNPCs;
+
         // Reusable list for Update cleanup (avoids allocation per frame)
         private static readonly List<int> _toRemove = new List<int>();
 
@@ -38,7 +41,22 @@ namespace WhipStacking
                 if (_effectField == null) { log.Error("_effect not found"); return false; }
                 if (_typeSetter == null) { log.Error("Type setter not found"); return false; }
 
-                log.Info($"Reflection initialized, maxNPCs={Main.maxNPCs}");
+                // Get _maxNPCs via reflection — direct access triggers Terraria.exe XNA cctor on dedServ
+                // On dedicated server, TerrariaServer assembly has name "TerrariaServer" — use it exclusively.
+                // Terraria.exe Main cctor fails on headless; its maxNPCs field access throws TargetInvocationException.
+                _maxNPCs = 201; // vanilla default fallback
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var n = asm.GetName().Name;
+                    if (n != "TerrariaServer") continue; // skip Terraria.exe — its Main cctor fails on dedServ
+                    var mainType = asm.GetType("Terraria.Main");
+                    if (mainType == null) break;
+                    var f = mainType.GetField("maxNPCs", BindingFlags.Public | BindingFlags.Static);
+                    try { if (f != null) _maxNPCs = (int)f.GetValue(null); } catch { }
+                    break;
+                }
+
+                log.Info($"Reflection initialized, maxNPCs={_maxNPCs}");
                 return true;
             }
             catch (Exception ex)
@@ -49,6 +67,8 @@ namespace WhipStacking
         }
 
         // --- Helpers ---
+
+        private static bool IsValidIndex(int idx) => idx >= 0 && idx < _maxNPCs;
 
         private static Player GetOwner(TagEffectState tagState)
         {
@@ -70,7 +90,7 @@ namespace WhipStacking
             var dict = MultiTagState.GetOrCreate(playerIdx);
             if (!dict.TryGetValue(whipType, out var entry))
             {
-                entry = new WhipTagEntry(whipType, effect, Main.maxNPCs);
+                entry = new WhipTagEntry(whipType, effect, _maxNPCs);
                 dict[whipType] = entry;
             }
             return entry;
@@ -93,7 +113,7 @@ namespace WhipStacking
             var dict = MultiTagState.GetOrCreate(playerIdx);
             if (!dict.ContainsKey(type))
             {
-                dict[type] = new WhipTagEntry(type, effect, Main.maxNPCs);
+                dict[type] = new WhipTagEntry(type, effect, _maxNPCs);
                 if (effect != null)
                     effect.OnSetToPlayer(GetOwner(tagState));
             }
@@ -137,6 +157,7 @@ namespace WhipStacking
 
                 int playerIdx = GetPlayerIndex(__instance);
                 var entry = GetOrCreateEntry(playerIdx, itemType, effect);
+                if (!IsValidIndex(npc.whoAmI)) return false;
                 entry.TimeLeftOnNPC[npc.whoAmI] = effect.TagDuration;
 
                 effect.OnTagAppliedToNPC(GetOwner(__instance), npc);
@@ -163,6 +184,7 @@ namespace WhipStacking
                 if (dict.Count == 0) return false;
 
                 int npcIdx = npcHit.whoAmI;
+                if (!IsValidIndex(npcIdx)) return false;
                 var owner = GetOwner(__instance);
 
                 foreach (var entry in dict.Values)
@@ -200,6 +222,7 @@ namespace WhipStacking
                 if (dict.Count == 0) return false;
 
                 int npcIdx = npcHit.whoAmI;
+                if (!IsValidIndex(npcIdx)) return false;
                 var owner = GetOwner(__instance);
 
                 foreach (var entry in dict.Values)
@@ -273,6 +296,7 @@ namespace WhipStacking
             if (!Enabled) return true;
             try
             {
+                if (!IsValidIndex(npcIndex)) { __result = false; return false; }
                 int playerIdx = GetPlayerIndex(__instance);
                 var dict = MultiTagState.GetOrCreate(playerIdx);
 
@@ -302,6 +326,7 @@ namespace WhipStacking
             if (!Enabled) return true;
             try
             {
+                if (!IsValidIndex(npcIndex)) { __result = false; return false; }
                 int playerIdx = GetPlayerIndex(__instance);
                 var dict = MultiTagState.GetOrCreate(playerIdx);
 
@@ -336,6 +361,7 @@ namespace WhipStacking
 
                 if (dict.TryGetValue(expectedActiveEffectType, out var entry) && entry.Effect != null)
                 {
+                    if (!IsValidIndex(npc.whoAmI)) return false;
                     entry.ProcTimeLeftOnNPC[npc.whoAmI] = entry.Effect.TagDuration;
                 }
             }
@@ -355,6 +381,7 @@ namespace WhipStacking
             if (!Enabled) return true;
             try
             {
+                if (!IsValidIndex(npcIndex)) return false;
                 int playerIdx = GetPlayerIndex(__instance);
                 var dict = MultiTagState.GetOrCreate(playerIdx);
 
@@ -377,6 +404,7 @@ namespace WhipStacking
             if (!Enabled) return true;
             try
             {
+                if (!IsValidIndex(npcIndex)) return false;
                 int playerIdx = GetPlayerIndex(__instance);
                 var dict = MultiTagState.GetOrCreate(playerIdx);
 

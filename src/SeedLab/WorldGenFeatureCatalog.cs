@@ -504,11 +504,11 @@ namespace SeedLab
                 "The Gog may spawn where a Surface Mushroom Biome borders a Forest. " +
                 "Gog tiles are painted deep blue and slowly spread. " +
                 "Requires Mythril-tier pickaxe to mine.",
-                category: "Biome"),
+                category: "Biomes"),
 
             WGSeedDef.Custom("gog_spawn", "Gog Spawn",
                 "Forces the starting area to be infected by the Gog regardless of biome layout.",
-                category: "Biome"),
+                category: "Biomes"),
         };
 
         /// <summary>

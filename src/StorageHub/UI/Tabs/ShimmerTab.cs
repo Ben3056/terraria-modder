@@ -92,6 +92,12 @@ namespace StorageHub.UI.Tabs
         private string _shimmerTooltipText;
         private int _shimmerTooltipX, _shimmerTooltipY;
 
+        // Toast notification
+        private string _toastMessage = "";
+        private int _toastTimer = 0;
+        private bool _toastIsError = false;
+        private const int ToastDuration = 120; // 2 seconds at 60fps
+
         /// <summary>
         /// Callback when storage is modified (shimmer consumed/created items).
         /// Parent UI should refresh storage data when this is called.
@@ -345,6 +351,57 @@ namespace StorageHub.UI.Tabs
             return false;
         }
 
+        /// <summary>
+        /// Get the name of the boss that must be defeated to unlock shimmer for this item.
+        /// Returns null if the item is not locked.
+        /// </summary>
+        private string GetLockBossName(int itemId)
+        {
+            int shimmerEquiv = GetShimmerEquivalentType(itemId);
+
+            // Check post-Moonlord transform lock
+            if (_shimmerPostMoonlord != null &&
+                shimmerEquiv >= 0 && shimmerEquiv < _shimmerPostMoonlord.Length &&
+                _shimmerPostMoonlord[shimmerEquiv] && !HasDefeatedMoonLord())
+            {
+                return "Moon Lord";
+            }
+
+            // Check decraft lock (recipe ingredient-based)
+            int decraftEquiv = GetShimmerEquivalentType(itemId, forDecrafting: true);
+            int recipeIndex = GetDecraftingRecipeIndex(decraftEquiv);
+            if (recipeIndex >= 0)
+            {
+                try
+                {
+                    var recipes = Main.recipe;
+                    if (recipes != null && recipeIndex < recipes.Length)
+                    {
+                        var recipe = recipes[recipeIndex];
+                        if (recipe != null)
+                        {
+                            var requiredItems = recipe.requiredItem;
+                            if (requiredItems != null)
+                            {
+                                foreach (var reqItem in requiredItems)
+                                {
+                                    if (reqItem == null) continue;
+                                    int reqType = ((Item)reqItem).type;
+                                    if (reqType == 154 && !HasDefeatedSkeletron())
+                                        return "Skeletron";
+                                    if (reqType == 1101 && !HasDefeatedGolem())
+                                        return "Golem";
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
         #endregion
 
         /// <summary>
@@ -380,6 +437,10 @@ namespace StorageHub.UI.Tabs
 
             // 5. Check if NPC spawn item (critters that transform in shimmer)
             if (GetMakeNPC(itemId) > 0)
+                return true;
+
+            // 6. Check custom mod shimmer transforms (ShimmerRegistry)
+            if (TerrariaModder.Core.Assets.ShimmerRegistry.TryGetTransform(itemId, out _))
                 return true;
 
             return false;
@@ -434,7 +495,7 @@ namespace StorageHub.UI.Tabs
         /// Get the shimmer type for an item.
         /// Uses item aliasing to determine the correct shimmer action.
         /// </summary>
-        private enum ShimmerType { None, DirectTransform, Decraft, CoinLuck, NPCSpawn, Locked }
+        private enum ShimmerType { None, DirectTransform, CustomTransform, Decraft, CoinLuck, NPCSpawn, Locked }
 
         private ShimmerType GetShimmerType(int itemId)
         {
@@ -473,6 +534,10 @@ namespace StorageHub.UI.Tabs
             // Check NPC spawn
             if (GetMakeNPC(itemId) > 0)
                 return ShimmerType.NPCSpawn;
+
+            // Check custom mod shimmer transforms (ShimmerRegistry)
+            if (TerrariaModder.Core.Assets.ShimmerRegistry.TryGetTransform(itemId, out _))
+                return ShimmerType.CustomTransform;
 
             return ShimmerType.None;
         }
@@ -515,10 +580,15 @@ namespace StorageHub.UI.Tabs
         private int GetShimmerResult(int itemId)
         {
             int shimmerEquiv = GetShimmerEquivalentType(itemId);
-            if (_shimmerTransformToItem == null || shimmerEquiv < 0 || shimmerEquiv >= _shimmerTransformToItem.Length)
-                return -1;
-            int result = _shimmerTransformToItem[shimmerEquiv];
-            return (result > 0 && result != shimmerEquiv) ? result : -1;
+            if (_shimmerTransformToItem != null && shimmerEquiv >= 0 && shimmerEquiv < _shimmerTransformToItem.Length)
+            {
+                int result = _shimmerTransformToItem[shimmerEquiv];
+                if (result > 0 && result != shimmerEquiv) return result;
+            }
+            // Fall through to custom registry
+            if (TerrariaModder.Core.Assets.ShimmerRegistry.TryGetTransform(itemId, out int customOut))
+                return customOut;
+            return -1;
         }
 
         /// <summary>
@@ -771,7 +841,23 @@ namespace StorageHub.UI.Tabs
             DrawDetailsPanel(x + leftWidth + panelGap, panelY, rightWidth, panelHeight);
 
             // Bottom controls
-            DrawShimmerControls(x, y + height - 72, width);
+            int bottomY = y + height - 72;
+            DrawShimmerControls(x, bottomY, width);
+
+            // Toast notification (centered, above bottom panel)
+            if (_toastTimer > 0)
+            {
+                _toastTimer--;
+                int toastWidth = Math.Min(300, width - 20);
+                int toastX = x + (width - toastWidth) / 2;
+                int toastY = bottomY - 35;
+                UIRenderer.DrawRect(toastX, toastY, toastWidth, 30,
+                    _toastIsError ? UIColors.Error.WithAlpha(230) : UIColors.Success.WithAlpha(230));
+                UIRenderer.DrawRectOutline(toastX, toastY, toastWidth, 30,
+                    _toastIsError ? UIColors.Error : UIColors.Success, 1);
+                UIRenderer.DrawText(_toastMessage, toastX + 10, toastY + 8,
+                    _toastIsError ? UIColors.Error : UIColors.Success);
+            }
 
             // Deferred tooltip (drawn last, on top of everything)
             if (!string.IsNullOrEmpty(_shimmerTooltipText))
@@ -885,7 +971,8 @@ namespace StorageHub.UI.Tabs
             {
                 // Locked items shouldn't normally appear (filtered by CanShimmer)
                 // but show status in case they slip through
-                UIRenderer.DrawText("LOCKED (defeat boss)", textX, resultY, UIColors.Error);
+                var lockBoss = GetLockBossName(group.ItemId);
+                UIRenderer.DrawText($"LOCKED (defeat {lockBoss ?? "boss"})", textX, resultY, UIColors.Error);
             }
             else if (shimmerType == ShimmerType.DirectTransform)
             {
@@ -933,6 +1020,23 @@ namespace StorageHub.UI.Tabs
                 int shimmerNpcId = GetShimmerNPC(group.ItemId);
                 string npcName = GetNPCName((short)shimmerNpcId);
                 UIRenderer.DrawText($"-> {npcName}", textX, resultY, UIColors.Success);
+            }
+            else if (shimmerType == ShimmerType.CustomTransform)
+            {
+                TerrariaModder.Core.Assets.ShimmerRegistry.TryGetTransform(group.ItemId, out int customOut, out int customInStack, out int customOutStack);
+                if (customOut > 0)
+                {
+                    UIRenderer.DrawText("->", textX, resultY, UIColors.Info);
+                    UIRenderer.DrawItem(customOut, textX + 20, resultY - 2, resultIconSize, resultIconSize);
+                    if (isHovered && WidgetInput.IsMouseOver(textX + 20, resultY - 2, resultIconSize, resultIconSize))
+                    {
+                        _shimmerTooltipText = GetItemName(customOut);
+                        _shimmerTooltipX = textX + 20;
+                        _shimmerTooltipY = resultY + resultIconSize;
+                    }
+                    if (customInStack > 1 || customOutStack > 1)
+                        UIRenderer.DrawText($"({customInStack}->{customOutStack})", textX + 42, resultY, UIColors.TextDim);
+                }
             }
 
             // Total count across all instances (right-aligned, vertically centered)
@@ -1024,6 +1128,7 @@ namespace StorageHub.UI.Tabs
             string headerText = shimmerType switch
             {
                 ShimmerType.DirectTransform => "TRANSFORMS INTO:",
+                ShimmerType.CustomTransform => "TRANSFORMS INTO:",
                 ShimmerType.Decraft => "DECRAFTS INTO:",
                 ShimmerType.CoinLuck => "SHIMMER EFFECT:",
                 ShimmerType.NPCSpawn => "RELEASES NPC:",
@@ -1053,6 +1158,10 @@ namespace StorageHub.UI.Tabs
                     break;
                 case ShimmerType.NPCSpawn:
                     y = DrawNPCSpawnVisualization(x, y, width, group.ItemId);
+                    break;
+                case ShimmerType.CustomTransform:
+                    int customResultId = GetShimmerResult(group.ItemId);
+                    y = DrawDirectTransformVisualization(x, y, width, group.ItemId, customResultId);
                     break;
             }
 
@@ -1533,7 +1642,8 @@ namespace StorageHub.UI.Tabs
 
             if (shimmerType == ShimmerType.Locked)
             {
-                UIRenderer.DrawText("Locked - defeat the required boss first", x + 10, y + 25, UIColors.Warning);
+                var lockBoss = GetLockBossName(item.ItemId);
+                UIRenderer.DrawText($"Locked (defeat {lockBoss ?? "the required boss"} first)", x + 10, y + 25, UIColors.Warning);
                 return;
             }
 
@@ -1687,13 +1797,24 @@ namespace StorageHub.UI.Tabs
             if (IsBlocked(item))
             {
                 _log.Debug($"[Shimmer] Item {item.Name} is blocked");
+                _toastMessage = $"{item.Name} is blocked — right-click to unblock";
+                _toastIsError = true;
+                _toastTimer = ToastDuration;
                 return;
             }
 
             var shimmerType = GetShimmerType(item.ItemId);
-            if (shimmerType != ShimmerType.DirectTransform && shimmerType != ShimmerType.Decraft)
+            if (shimmerType != ShimmerType.DirectTransform && shimmerType != ShimmerType.Decraft && shimmerType != ShimmerType.CustomTransform)
             {
                 _log.Warn($"[Shimmer] Item {item.Name} cannot be shimmered (type={shimmerType})");
+                var lockBossName = shimmerType == ShimmerType.Locked ? GetLockBossName(item.ItemId) : null;
+                string reason = shimmerType == ShimmerType.Locked ? $"Locked — defeat {lockBossName ?? "the required boss"} first"
+                    : shimmerType == ShimmerType.NPCSpawn ? "Toss into shimmer manually to spawn NPC"
+                    : shimmerType == ShimmerType.CoinLuck ? "Toss coins into shimmer manually"
+                    : "Cannot be shimmered";
+                _toastMessage = reason;
+                _toastIsError = true;
+                _toastTimer = ToastDuration;
                 return;
             }
 
@@ -1701,6 +1822,9 @@ namespace StorageHub.UI.Tabs
             if (actualAmount <= 0)
             {
                 _log.Warn($"[Shimmer] Invalid amount: {actualAmount}");
+                _toastMessage = "Invalid amount";
+                _toastIsError = true;
+                _toastTimer = ToastDuration;
                 return;
             }
 
@@ -1712,6 +1836,24 @@ namespace StorageHub.UI.Tabs
                 if (actualAmount <= 0)
                 {
                     _log.Warn($"[Shimmer] Need at least {inputCount}x {item.Name} to decraft");
+                    _toastMessage = $"Need at least {inputCount}x {item.Name} to decraft";
+                    _toastIsError = true;
+                    _toastTimer = ToastDuration;
+                    return;
+                }
+            }
+
+            // For custom transforms, adjust amount to be a multiple of inputStack
+            if (shimmerType == ShimmerType.CustomTransform)
+            {
+                TerrariaModder.Core.Assets.ShimmerRegistry.TryGetTransform(item.ItemId, out _, out int customInputStack, out _);
+                actualAmount = (actualAmount / customInputStack) * customInputStack;
+                if (actualAmount <= 0)
+                {
+                    _log.Warn($"[Shimmer] Need at least {customInputStack}x {item.Name} for custom shimmer transform");
+                    _toastMessage = $"Need at least {customInputStack}x {item.Name}";
+                    _toastIsError = true;
+                    _toastTimer = ToastDuration;
                     return;
                 }
             }
@@ -1793,6 +1935,19 @@ namespace StorageHub.UI.Tabs
                 placed = PlaceShimmerResultToInventory(resultItemId, actualAmount);
                 if (placed)
                     _log.Info($"Shimmered {actualAmount}x {item.Name} into {GetItemName(resultItemId)}");
+                else
+                    _log.Error($"[Shimmer] Failed to place {actualAmount}x {GetItemName(resultItemId)} - will restore input items");
+            }
+            else if (shimmerType == ShimmerType.CustomTransform)
+            {
+                TerrariaModder.Core.Assets.ShimmerRegistry.TryGetTransform(item.ItemId, out int customOut, out int customInStack, out int customOutStack);
+                int batches = actualAmount / customInStack;
+                int outputAmount = batches * customOutStack;
+                placed = PlaceShimmerResultToInventory(customOut, outputAmount);
+                if (placed)
+                    _log.Info($"Shimmered {actualAmount}x {item.Name} into {outputAmount}x {GetItemName(customOut)} (custom transform)");
+                else
+                    _log.Error($"[Shimmer] Failed to place {outputAmount}x {GetItemName(customOut)} - will restore input items");
             }
             else
             {
@@ -1852,30 +2007,34 @@ namespace StorageHub.UI.Tabs
 
             if (!placed)
             {
-                // Try to return original items to storage via DepositItem
-                // ONLY do this if NO outputs were placed (to prevent duplication)
-                _log.Error($"Failed to place shimmer result in inventory! Attempting recovery...");
+                // CRITICAL: Restore consumed input items when output placement fails.
+                // Use actualAmount (not taken.Stack) because remainder may have already been
+                // returned to storage during decraft alignment (lines above).
+                _log.Error($"Failed to place shimmer result in inventory! Attempting to restore {actualAmount}x {item.Name}...");
                 if (item.SourceChestIndex >= 0)
                     Mod.Dumper?.DumpStateWithChest("SHIMMER_PLACE_FAILED", item.SourceChestIndex);
                 else
                     Mod.Dumper?.DumpState("SHIMMER_PLACE_FAILED");
-                int recoveryDeposited = _storage.DepositItem(taken, out int depositedTo);
-                if (recoveryDeposited >= taken.Stack)
+
+                // Build a recovery snapshot with the actual consumed amount
+                var recoverySnap = new ItemSnapshot(taken.ItemId, actualAmount, taken.Prefix,
+                    taken.Name, taken.MaxStack, taken.Rarity, -1, -1);
+                int recoveryDeposited = _storage.DepositItem(recoverySnap, out int depositedTo);
+                if (recoveryDeposited >= actualAmount)
                 {
-                    _log.Info($"Recovery successful - items returned to chest {depositedTo}");
+                    _log.Info($"Recovery successful - {actualAmount}x {item.Name} returned to chest {depositedTo}");
                     Mod.Dumper?.DumpStateWithChest("SHIMMER_RECOVERY_OK", depositedTo);
                 }
                 else if (recoveryDeposited > 0)
                 {
-                    int recoveryLost = taken.Stack - recoveryDeposited;
-                    _log.Error($"CRITICAL: Partial recovery - {recoveryDeposited}/{taken.Stack}x {item.Name} returned, {recoveryLost} may be lost!");
-                    // Try to spawn remainder in inventory as last resort
+                    int recoveryLost = actualAmount - recoveryDeposited;
+                    _log.Warn($"[Shimmer] Partial recovery to storage ({recoveryDeposited}/{actualAmount}). Spawning remaining {recoveryLost}x {item.Name} in inventory.");
                     PlaceShimmerResultToInventory(taken.ItemId, recoveryLost);
                 }
                 else
                 {
-                    _log.Error($"CRITICAL: Recovery to storage failed - spawning {taken.Stack}x {item.Name} in inventory as last resort");
-                    PlaceShimmerResultToInventory(taken.ItemId, taken.Stack);
+                    _log.Warn($"[Shimmer] Storage recovery failed. Spawning {actualAmount}x {item.Name} in inventory as last resort.");
+                    PlaceShimmerResultToInventory(taken.ItemId, actualAmount);
                     Mod.Dumper?.DumpState("SHIMMER_RECOVERY_FAILED");
                 }
             }
@@ -2038,6 +2197,9 @@ namespace StorageHub.UI.Tabs
 
         /// <summary>
         /// Fallback: Place item directly into inventory slot.
+        /// Sends packet 5 per slot modified so multiplayer clients see the change.
+        /// This path only fires when both QuickSpawnItem overloads fail — should not
+        /// happen in normal Host &amp; Play, but must be correct if it does.
         /// </summary>
         private bool PlaceItemDirectly(Player player, int itemId, int stack)
         {
@@ -2063,6 +2225,8 @@ namespace StorageHub.UI.Tabs
                     int canAdd = Math.Min(remaining, maxStack - invItem.stack);
                     invItem.stack += canAdd;
                     remaining -= canAdd;
+                    if (Main.netMode != 0)
+                        try { NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, i); } catch { }
                 }
 
                 // Second pass: find empty slots
@@ -2082,6 +2246,8 @@ namespace StorageHub.UI.Tabs
                     int toPlace = Math.Min(remaining, maxStack);
                     invItem.stack = toPlace;
                     remaining -= toPlace;
+                    if (Main.netMode != 0)
+                        try { NetMessage.TrySendData(5, -1, -1, null, Main.myPlayer, i); } catch { }
                 }
 
                 if (remaining > 0)

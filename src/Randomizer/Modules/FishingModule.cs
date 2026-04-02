@@ -15,9 +15,10 @@ namespace Randomizer.Modules
         public override string Name => "Fishing Shuffle";
         public override string Description => "Fish up random items instead";
         public override string Tooltip => "Each fishing catch is replaced with a random item. Every reel is a surprise.";
-        private const int MaxItemId = 6144; // ItemID.Count=6145, last valid=6144 (verified from decomp)
+        private static readonly int MaxItemId = Terraria.ID.ItemID.Count - 1;
 
         internal static FishingModule Instance;
+        private static MethodInfo _patchedMethod;
 
         public override void BuildShuffleMap()
         {
@@ -48,6 +49,7 @@ namespace Randomizer.Modules
                     var prefix = typeof(FishingModule).GetMethod(nameof(GiveItem_Prefix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(giveItem, prefix: new HarmonyMethod(prefix));
+                    _patchedMethod = giveItem;
                     Log.Info("[Randomizer] Fishing: patched AI_061_FishingBobber_GiveItemToPlayer");
                 }
                 else
@@ -67,13 +69,18 @@ namespace Randomizer.Modules
         public static void GiveItem_Prefix(ref int itemType)
         {
             if (Instance == null || !Instance.Enabled) return;
+            if (Main.netMode != 0) return;
             if (itemType <= 0) return;
             itemType = Instance.GetRandomInRange(1, MaxItemId + 1);
         }
 
         public override void RemovePatches(Harmony harmony)
         {
-            // Handled by harmony.UnpatchAll
+            if (_patchedMethod != null)
+            {
+                harmony.Unpatch(_patchedMethod, HarmonyPatchType.All, "com.terrariamodder.randomizer");
+                _patchedMethod = null;
+            }
         }
     }
 }

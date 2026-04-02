@@ -95,7 +95,23 @@ namespace TerrariaModder.Core.Assets
                 return true;
 
             var def = ItemRegistry.GetDefinition(item.type);
-            if (def == null) return true;
+            if (def == null)
+            {
+                // I4: KnownUnknown placeholder — build minimal tooltip
+                if (ItemRegistry.IsKnownUnknown(item.type, out string fullId))
+                {
+                    try
+                    {
+                        string modId = fullId.Contains(":") ? fullId.Split(':')[0] : fullId;
+                        toolTipLine[0] = $"[{fullId}]";
+                        toolTipLine[1] = $"This item requires [{modId}] to be installed.";
+                        numLines = 2;
+                    }
+                    catch { toolTipLine[0] = "[Unknown Item]"; numLines = 1; }
+                    return false;
+                }
+                return true;
+            }
 
             try
             {
@@ -237,7 +253,7 @@ namespace TerrariaModder.Core.Assets
             if (item.ToolTip != null)
             {
                 int lines = item.ToolTip.Lines;
-                for (int i = 0; i < lines; i++)
+                for (int i = 0; i < lines && numLines < toolTipLine.Length; i++)
                 {
                     string line = item.ToolTip.GetLine(i);
                     if (!string.IsNullOrEmpty(line))
@@ -276,6 +292,33 @@ namespace TerrariaModder.Core.Assets
                 catch (Exception ex)
                 {
                     _log?.Debug($"[TooltipPatches] ModifyTooltips error for type {item.type}: {ex.Message}");
+                }
+            }
+
+            // J1: Apply global tooltip modifiers (registered via context.RegisterTooltipModifier)
+            var globalModifiers = TooltipRegistry.GetModifiers();
+            if (globalModifiers.Count > 0)
+            {
+                try
+                {
+                    var lines = new List<string>(numLines);
+                    for (int i = 0; i < numLines; i++)
+                        lines.Add(toolTipLine[i]);
+
+                    foreach (var modifier in globalModifiers)
+                    {
+                        try { modifier(item.type, lines); }
+                        catch (Exception ex) { _log?.Debug($"[TooltipPatches] Global modifier error: {ex.Message}"); }
+                    }
+
+                    int cap = Math.Min(lines.Count, toolTipLine.Length);
+                    for (int i = 0; i < cap; i++)
+                        toolTipLine[i] = lines[i];
+                    numLines = cap;
+                }
+                catch (Exception ex)
+                {
+                    _log?.Debug($"[TooltipPatches] Global modifier dispatch error: {ex.Message}");
                 }
             }
         }

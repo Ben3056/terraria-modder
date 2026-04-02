@@ -37,20 +37,22 @@ The easiest way is the **[TerrariaModder Vault](https://www.nexusmods.com/terrar
 
 Download Core and any mods you want from [Nexus Mods](https://www.nexusmods.com/profile/Inidar/mods), or install them all through the [Vault](https://www.nexusmods.com/terraria/mods/159) in one place. Each mod is a separate download.
 
-| Mod | Description | Keybind | Download |
-|-----|-------------|---------|----------|
-| **ModMenu** | In-game configuration UI for all mods (built into Core) | F6 | Included in [Core](https://www.nexusmods.com/terraria/mods/135) |
-| **SkipIntro** | Skips the ReLogic splash screen on startup | Automatic | [Nexus](https://www.nexusmods.com/terraria/mods/140) |
-| **QuickKeys** | Auto-torch, recall hotkey, quick-stack, ruler, extended hotbar (opt-in) | Tilde, Home, End, K | [Nexus](https://www.nexusmods.com/terraria/mods/143) |
-| **AutoBuffs** | Automatically applies nearby furniture buffs | Automatic | [Nexus](https://www.nexusmods.com/terraria/mods/138) |
-| **PetChests** | Right-click any cosmetic pet to access piggy bank | Right-click | [Nexus](https://www.nexusmods.com/terraria/mods/142) |
-| **ItemSpawner** | Spawn any item (singleplayer only) | Insert | [Nexus](https://www.nexusmods.com/terraria/mods/141) |
-| **StorageHub** | Unified storage with crafting, recipes, shimmer decraft, painting chest, relay network | F5 | [Nexus](https://www.nexusmods.com/terraria/mods/136) |
-| **AdminPanel** | God mode, movement speed, teleports, time controls, respawn settings | Backslash, F9 | [Nexus](https://www.nexusmods.com/terraria/mods/137) |
-| **WhipStacking** | Restores pre-1.4.5 whip tag stacking | Automatic | [Nexus](https://www.nexusmods.com/terraria/mods/139) |
-| **SeedLab** | Toggle secret seed features for world gen (WIP) | F10 | [Nexus](https://www.nexusmods.com/terraria/mods/144) |
-| **FpsUnlocked** | Unlock frame rate with smooth interpolation (60hz logic + high-FPS rendering) | Automatic | [Nexus](https://www.nexusmods.com/terraria/mods/147) |
-| **DebugTools** | Debug HTTP server, in-game console, virtual input, window management | Ctrl+` | — |
+| Mod | Description | Keybind | Multiplayer | Download |
+|-----|-------------|---------|-------------|----------|
+| **ModMenu** | In-game configuration UI for all mods (built into Core) | F6 | All modes | Included in [Core](https://www.nexusmods.com/terraria/mods/135) |
+| **SkipIntro** | Skips the ReLogic splash screen on startup | Automatic | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/140) |
+| **QuickKeys** | Auto-torch, recall hotkey, quick-stack, ruler, extended hotbar (opt-in) | Tilde, Home, End, K | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/143) |
+| **AutoBuffs** | Automatically applies nearby furniture buffs | Automatic | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/138) |
+| **PetChests** | Right-click any cosmetic pet to access piggy bank | Right-click | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/142) |
+| **ItemSpawner** | Spawn any item (admin or granted players in MP) | Insert | Optional | [Nexus](https://www.nexusmods.com/terraria/mods/141) |
+| **StorageHub** | Unified storage with crafting, recipes, shimmer, mysterious chest, relay network | F5 | Required | [Nexus](https://www.nexusmods.com/terraria/mods/136) |
+| **AdminPanel** | God mode, movement speed, teleports, time controls, respawn settings | Backslash, F9 | Optional | [Nexus](https://www.nexusmods.com/terraria/mods/137) |
+| **WhipStacking** | Restores pre-1.4.5 whip tag stacking | Automatic | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/139) |
+| **SeedLab** | Toggle secret seed features for world gen | F10 | Optional | [Nexus](https://www.nexusmods.com/terraria/mods/144) |
+| **FpsUnlocked** | Unlock frame rate with smooth interpolation (60hz logic + high-FPS rendering) | Automatic | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/147) |
+| **BiomeSpread** | Toggle evil biome spread on or off | Automatic | Client-only | [Nexus](https://www.nexusmods.com/terraria/mods/146) |
+| **Randomizer** | Modular randomizer with seed system — shuffle chests, drops, recipes, shops | Numpad / | Optional | [Nexus](https://www.nexusmods.com/terraria/mods/147) |
+| **DebugTools** | HTTP debug server (70+ endpoints), in-game console, virtual input, runtime introspection | Ctrl+` | Client-only | — |
 
 Press **F6** in-game to configure mods and rebind keys. Changes are saved automatically and keybinds persist across game restarts.
 
@@ -74,7 +76,7 @@ Learn by studying real, working mods:
 - [QuickKeys](walkthroughs/quick-keys.md) - Complex input handling and reflection
 - [PetChests](walkthroughs/pet-chests.md) - Projectile interaction
 - [ItemSpawner](walkthroughs/item-spawner.md) - Full UI implementation
-- [StorageHub](walkthroughs/storage-hub.md) - Multi-tab storage, crafting, shimmer, painting chest, relay network
+- [StorageHub](walkthroughs/storage-hub.md) - Multi-tab storage, crafting, shimmer, mysterious chest, relay network
 - [AdminPanel](walkthroughs/admin-panel.md) - UI sliders, Harmony patches, boss detection
 - [WhipStacking](walkthroughs/whip-stacking.md) - Harmony prefixes, restoring removed mechanics
 - [DebugTools](walkthroughs/debug-tools.md) - HTTP server, console, virtual input, window management

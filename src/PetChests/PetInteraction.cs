@@ -302,7 +302,7 @@ namespace PetChests
                         float dist = Distance(playerCX, playerCY, petCX, petCY);
                         if (dist <= SOUND_MUTE_RANGE)
                         {
-                            proj.soundDelay = int.MaxValue;
+                            proj.soundDelay = 60;
                         }
                     }
                 }
@@ -355,6 +355,7 @@ namespace PetChests
         {
             _keepPiggyOpen = false;
             _boundPetIndex = -1;
+            _lastMouseRight = false;  // Reset to prevent stale state causing false reopen after cooldown
             _closeCooldown = CLOSE_COOLDOWN_FRAMES;  // Prevent immediate reopen
             player.chest = -1;
             SoundEngine.PlaySound(11);
@@ -384,7 +385,16 @@ namespace PetChests
                 Vector2 screenPos = Main.screenPosition;
 
                 x = mouseScreen.X + screenPos.X;
-                y = mouseScreen.Y + screenPos.Y;
+
+                // Account for reverse gravity (gravDir == -1):
+                // Vanilla Main.MouseWorld flips the Y coordinate when gravity is reversed.
+                // Without this, the click position is mirrored vertically, causing
+                // interaction checks to target the wrong world position.
+                if (Main.player[Main.myPlayer].gravDir == -1f)
+                    y = screenPos.Y + (float)Main.screenHeight - (float)Main.mouseY;
+                else
+                    y = mouseScreen.Y + screenPos.Y;
+
                 return true;
             }
             catch

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Terraria;
@@ -12,16 +13,23 @@ namespace TerrariaModder.Core.Assets
     /// Save interception for player files.
     ///
     /// Prefix on Player.SavePlayer:
-    ///   1. Write moddata FIRST (crash safety)
-    ///   2. Scan all ~352 player item slots for custom items (type >= VanillaItemCount)
-    ///   3. Extract custom items to moddata, replace with air
-    ///   4. Let vanilla save proceed (writes clean .plr)
+    ///   1. Scan all ~352 player item slots for custom items (type >= VanillaItemCount)
+    ///   2. Extract custom items to moddata, replace with air
+    ///   3. Let vanilla save proceed (writes clean .plr)
+    ///   H4: When netMode==1 (dedicated server client), send CustomItemSave packet instead of
+    ///       writing to disk — server is authoritative for player item data.
     ///
     /// Postfix on Player.SavePlayer:
-    ///   5. Restore custom items to memory for continued play
+    ///   4. Restore custom items to memory for continued play
     ///
     /// Postfix on Player.LoadPlayer:
+    ///   5. Migrate legacy sidecar if needed (one-time, H3)
     ///   6. Read moddata, resolve string IDs → runtime types, inject items
+    ///   H4: When netMode==1, skip injection — wait for CustomItemSync from server.
+    ///
+    /// Preservation (H2): Items from mods that are NOT currently loaded are stored in
+    /// _preservedItems and written back to the moddata file on save, preventing item
+    /// loss when mods are temporarily uninstalled.
     /// </summary>
     internal static class PlayerSavePatches
     {
@@ -31,6 +39,9 @@ namespace TerrariaModder.Core.Assets
 
         // Temporary storage for extracted items during save (slotKey → Item)
         private static readonly Dictionary<string, Item> _extractedItems = new Dictionary<string, Item>();
+
+        // Items from unloaded mods — preserved across save/load cycles (H2)
+        private static List<ModdataFile.ItemEntry> _preservedItems = new List<ModdataFile.ItemEntry>();
 
         public static void Initialize(ILogger logger)
         {
@@ -154,20 +165,45 @@ namespace TerrariaModder.Core.Assets
                     }
                 }
 
-                // Include pending items in moddata so they persist across save/quit
+                // Include pending items so they persist across save/quit
                 customItems.AddRange(PendingItemStore.GetPlayerModdataEntries());
 
-                // Write moddata FIRST (crash safety - data persisted before mutation)
-                string moddataPath = ModdataFile.GetPlayerModdataPath(playerFile.Path);
+                // H4: When connected to a dedicated server (netMode==1), the server is
+                // authoritative for player data — send items via packet instead of local write.
+                if (Main.netMode == 1)
+                {
+                    // Send CustomItemSave to server; server will validate and persist
+                    Net.NetSync.SendCustomItemSave(customItems);
+                    _log?.Debug($"[PlayerSavePatches] netMode==1: sent {customItems.Count} items to server (CustomItemSave)");
 
-                if (customItems.Count == 0)
+                    // Still replace with air so vanilla saves a clean .plr (no custom items)
+                    foreach (var kvp in _extractedItems)
+                    {
+                        var parts = kvp.Key.Split(':');
+                        SetAir(player, parts[0], int.Parse(parts[1]));
+                    }
+                    return;
+                }
+
+                // Determine moddata path
+                string moddataPath = ModdataFile.GetPlayerModdataPath(playerFile.Path);
+                if (moddataPath == null)
+                {
+                    _log?.Warn("[PlayerSavePatches] Could not determine moddata path");
+                    RestoreAll(player);
+                    return;
+                }
+
+                if (customItems.Count == 0 && _preservedItems.Count == 0)
                 {
                     // Delete stale moddata so deleted pending items don't reappear on next load
                     ModdataFile.Delete(moddataPath);
-                    _log?.Debug("[PlayerSavePatches] No custom items to extract, cleaned up moddata");
+                    _log?.Debug("[PlayerSavePatches] No custom items, cleaned up moddata");
                     return;
                 }
-                if (!ModdataFile.Write(moddataPath, customItems))
+
+                // Write moddata FIRST (crash safety — data persisted before mutation)
+                if (!ModdataFile.Write(moddataPath, customItems, _preservedItems))
                 {
                     _log?.Error("[PlayerSavePatches] Failed to write moddata, aborting extraction");
                     RestoreAll(player);
@@ -181,7 +217,8 @@ namespace TerrariaModder.Core.Assets
                     SetAir(player, parts[0], int.Parse(parts[1]));
                 }
 
-                _log?.Info($"[PlayerSavePatches] Extracted {customItems.Count} custom items before save");
+                _log?.Info($"[PlayerSavePatches] Extracted {customItems.Count} custom items before save" +
+                    (_preservedItems.Count > 0 ? $" ({_preservedItems.Count} preserved from unloaded mods)" : ""));
             }
             catch (Exception ex)
             {
@@ -219,12 +256,47 @@ namespace TerrariaModder.Core.Assets
 
             try
             {
-                string moddataPath = ModdataFile.GetPlayerModdataPath(playerPath);
-                var items = ModdataFile.Read(moddataPath);
+                // H4: When connected to a REMOTE dedicated server, skip loading local moddata.
+                // CustomItemSync from the server will inject the authoritative items.
+                // Exception: H&P host (IsHostAndPlay) uses local moddata since the server
+                // was just started and doesn't have the player's sidecar data yet.
+                if (Main.netMode == 1 && !Terraria.Netplay.IsHostAndPlay)
+                {
+                    _log?.Debug("[PlayerSavePatches] netMode==1 (remote server): skipping local moddata load (awaiting CustomItemSync)");
+                    return;
+                }
+
+                // H3: One-time migration from legacy sidecar format
+                string v2Path = ModdataFile.GetPlayerModdataPath(playerPath);
+                string v1Path = ModdataFile.GetLegacyPlayerModdataPath(playerPath);
+                if (v2Path != null && v1Path != null)
+                    ModdataFile.MigrateIfNeeded(v2Path, v1Path);
+
+                if (v2Path == null)
+                {
+                    _log?.Warn("[PlayerSavePatches] Could not determine moddata path");
+                    return;
+                }
+
+                // Get loaded mod IDs (mods that have registered custom items)
+                var loadedModIds = new HashSet<string>(
+                    ItemRegistry.AllIds.Select(id =>
+                    {
+                        int c = id.IndexOf(':');
+                        return c > 0 ? id.Substring(0, c) : null;
+                    }).Where(m => m != null),
+                    StringComparer.OrdinalIgnoreCase);
+
+                // Read moddata: active items (loaded mods) + preserved items (unloaded mods)
+                var items = ModdataFile.Read(v2Path, loadedModIds, out var preserved);
+                _preservedItems = preserved ?? new List<ModdataFile.ItemEntry>();
+
+                if (_preservedItems.Count > 0)
+                    _log?.Info($"[PlayerSavePatches] Preserving {_preservedItems.Count} item(s) from unloaded mod(s)");
 
                 if (items.Count == 0)
                 {
-                    _log?.Debug("[PlayerSavePatches] No moddata items to inject");
+                    _log?.Debug("[PlayerSavePatches] No active moddata items to inject");
                     return;
                 }
 
@@ -238,7 +310,7 @@ namespace TerrariaModder.Core.Assets
                 {
                     try
                     {
-                        // Resolve string ID to runtime type
+                        // Resolve string ID to runtime type (checks canonical + alias map)
                         int runtimeType = ItemRegistry.GetRuntimeType(entry.ItemId);
                         if (runtimeType < 0)
                         {
@@ -247,12 +319,17 @@ namespace TerrariaModder.Core.Assets
                             continue;
                         }
 
+                        // Log alias resolution for transparency
+                        string resolvedId = ItemRegistry.GetFullId(runtimeType);
+                        if (resolvedId != null && !string.Equals(resolvedId, entry.ItemId, StringComparison.OrdinalIgnoreCase))
+                            _log?.Info($"[Moddata] Resolved alias \"{entry.ItemId}\" → \"{resolvedId}\"");
+
                         // Pending items from previous session — re-add to store
                         if (entry.Location == "pending")
                         {
                             PendingItemStore.AddPlayerItem(new PendingItemStore.PendingItem
                             {
-                                ItemId = entry.ItemId,
+                                ItemId = resolvedId ?? entry.ItemId,
                                 RuntimeType = runtimeType,
                                 Stack = entry.Stack,
                                 Prefix = entry.Prefix,
@@ -305,7 +382,7 @@ namespace TerrariaModder.Core.Assets
                                     _log?.Info($"[PlayerSavePatches] No slot for {entry.ItemId} — added to pending items");
                                     PendingItemStore.AddPlayerItem(new PendingItemStore.PendingItem
                                     {
-                                        ItemId = entry.ItemId,
+                                        ItemId = resolvedId ?? entry.ItemId,
                                         RuntimeType = runtimeType,
                                         Stack = entry.Stack,
                                         Prefix = entry.Prefix,
@@ -333,6 +410,114 @@ namespace TerrariaModder.Core.Assets
             }
         }
 
+        // ── Called by NetSync when CustomItemSync arrives from server (H4) ──
+
+        /// <summary>
+        /// Inject custom items received from server (H4 server-authoritative flow).
+        /// Clears any locally-loaded custom items first, then injects server items.
+        /// </summary>
+        internal static void InjectFromServer(Player player, List<ModdataFile.ItemEntry> serverItems)
+        {
+            if (player == null || serverItems == null) return;
+
+            try
+            {
+                // H&P host: local moddata was already loaded during LoadPlayer. Don't overwrite
+                // with server data (server may not have the sidecar files yet).
+                if (Terraria.Netplay.IsHostAndPlay)
+                {
+                    _log?.Info("[PlayerSavePatches] H&P host: keeping locally-loaded custom items (skipping server sync)");
+                    return;
+                }
+
+                // Clear any custom items already in inventory (from local moddata load)
+                ClearCustomItems(player);
+                PendingItemStore.ClearPlayer();
+
+                int injected = 0;
+                foreach (var entry in serverItems)
+                {
+                    int runtimeType = ItemRegistry.GetRuntimeType(entry.ItemId);
+                    if (runtimeType < 0)
+                        runtimeType = ItemRegistry.GetKnownUnknownType(entry.ItemId);
+                    if (runtimeType < 0)
+                    {
+                        _log?.Debug($"[PlayerSavePatches] Server sent unknown item: {entry.ItemId}");
+                        continue;
+                    }
+
+                    var item = new Item();
+                    item.SetDefaults(runtimeType);
+                    item.stack = entry.Stack;
+                    item.prefix = (byte)entry.Prefix;
+                    item.favorited = entry.Favorited;
+                    if (entry.Prefix > 0) item.Prefix(entry.Prefix);
+
+                    if (IsSlotEmpty(player, entry.Location, entry.Slot))
+                    {
+                        SetItem(player, entry.Location, entry.Slot, item);
+                        injected++;
+                    }
+                    else
+                    {
+                        int alt = FindEmptySlot(player, entry.Location);
+                        if (alt >= 0) { SetItem(player, entry.Location, alt, item); injected++; }
+                        else
+                        {
+                            // Last resort: inventory or pending
+                            bool placed = false;
+                            foreach (var overflow in new[] { "inventory", "bank", "bank2", "bank3", "bank4" })
+                            {
+                                alt = FindEmptySlot(player, overflow);
+                                if (alt >= 0) { SetItem(player, overflow, alt, item); injected++; placed = true; break; }
+                            }
+                            if (!placed)
+                            {
+                                PendingItemStore.AddPlayerItem(new PendingItemStore.PendingItem
+                                {
+                                    ItemId = entry.ItemId,
+                                    RuntimeType = runtimeType,
+                                    Stack = entry.Stack,
+                                    Prefix = entry.Prefix,
+                                    Favorited = entry.Favorited
+                                });
+                            }
+                        }
+                    }
+                }
+
+                _log?.Info($"[PlayerSavePatches] Injected {injected} server-authoritative items (CustomItemSync)");
+            }
+            catch (Exception ex)
+            {
+                _log?.Error($"[PlayerSavePatches] InjectFromServer error: {ex.Message}");
+            }
+        }
+
+        private static void ClearCustomItems(Player player)
+        {
+            void ClearArray(Item[] arr) {
+                if (arr == null) return;
+                for (int i = 0; i < arr.Length; i++)
+                    if (arr[i] != null && !arr[i].IsAir && arr[i].type >= ItemRegistry.VanillaItemCount)
+                        arr[i] = new Item();
+            }
+
+            ClearArray(player.inventory);
+            ClearArray(player.armor);
+            ClearArray(player.dye);
+            ClearArray(player.miscEquips);
+            ClearArray(player.miscDyes);
+            ClearArray(player.bank?.item);
+            ClearArray(player.bank2?.item);
+            ClearArray(player.bank3?.item);
+            ClearArray(player.bank4?.item);
+            if (player.Loadouts != null)
+                foreach (var lo in player.Loadouts) { ClearArray(lo?.Armor); ClearArray(lo?.Dye); }
+            if (player.trashItem != null && !player.trashItem.IsAir && player.trashItem.type >= ItemRegistry.VanillaItemCount)
+                player.trashItem = new Item();
+        }
+
         // ── Scanning helpers ──
 
         private static void ScanArray(Item[] items, string location,
@@ -347,8 +532,14 @@ namespace TerrariaModder.Core.Assets
                 string fullId = ItemRegistry.GetFullId(item.type);
                 if (fullId == null)
                 {
-                    _log?.Warn($"[Save] Custom item type {item.type} in {location}[{i}] has no registered ID - item will be lost on save");
-                    continue;
+                    // Check KnownUnknowns — placeholder for Optional mod item from server
+                    if (ItemRegistry.IsKnownUnknown(item.type, out string kuFullId))
+                        fullId = kuFullId;
+                    else
+                    {
+                        _log?.Warn($"[Save] Custom item type {item.type} in {location}[{i}] has no registered ID - item will be lost on save");
+                        continue;
+                    }
                 }
 
                 moddataList.Add(new ModdataFile.ItemEntry
@@ -371,7 +562,13 @@ namespace TerrariaModder.Core.Assets
             if (item == null || item.IsAir || item.type < ItemRegistry.VanillaItemCount) return;
 
             string fullId = ItemRegistry.GetFullId(item.type);
-            if (fullId == null) return;
+            if (fullId == null)
+            {
+                if (ItemRegistry.IsKnownUnknown(item.type, out string kuFullId))
+                    fullId = kuFullId;
+                else
+                    return;
+            }
 
             moddataList.Add(new ModdataFile.ItemEntry
             {
@@ -499,5 +696,6 @@ namespace TerrariaModder.Core.Assets
                     SetItem(player, parts[0], slot, kvp.Value);
             }
         }
+
     }
 }

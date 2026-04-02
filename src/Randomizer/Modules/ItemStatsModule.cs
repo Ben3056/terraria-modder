@@ -18,6 +18,7 @@ namespace Randomizer.Modules
         public override bool IsDangerous => true;
 
         internal static ItemStatsModule Instance;
+        private static MethodInfo _patchedMethod;
 
         public override void BuildShuffleMap()
         {
@@ -47,6 +48,7 @@ namespace Randomizer.Modules
                     var postfix = typeof(ItemStatsModule).GetMethod(nameof(SetDefaults_Postfix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(setDefaults, postfix: new HarmonyMethod(postfix));
+                    _patchedMethod = setDefaults;
                     Log.Info("[Randomizer] Item Stats: patched Item.SetDefaults");
                 }
                 else
@@ -67,11 +69,12 @@ namespace Randomizer.Modules
         public static void SetDefaults_Postfix(Item __instance)
         {
             if (Instance == null || !Instance.Enabled) return;
+            if (Main.netMode != 0) return;
 
             try
             {
                 int type = __instance.type;
-                if (type <= 0) return;
+                if (type <= 0 || type >= 6145) return; // Skip air and custom Asset items
 
                 int seed = Instance.Seed?.Seed ?? 0;
                 if (seed == 0) return;
@@ -128,12 +131,16 @@ namespace Randomizer.Modules
             h = ((h >> 16) ^ h) * 0x45d9f3b;
             h = ((h >> 16) ^ h) * 0x45d9f3b;
             h = (h >> 16) ^ h;
-            return 0.5 + (h % 1500) / 1000.0; // 0.5 to 2.0
+            return 0.5 + (h % 1501) / 1000.0; // 0.5 to 2.0
         }
 
         public override void RemovePatches(Harmony harmony)
         {
-            // Handled by harmony.UnpatchAll
+            if (_patchedMethod != null)
+            {
+                harmony.Unpatch(_patchedMethod, HarmonyPatchType.Postfix, "com.terrariamodder.randomizer");
+                _patchedMethod = null;
+            }
         }
     }
 }

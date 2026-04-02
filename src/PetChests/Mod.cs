@@ -8,7 +8,7 @@ using TerrariaModder.Core.Logging;
 
 namespace PetChests
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle
     {
         public string Id => "pet-chests";
         public string Name => "Pet Chests";
@@ -18,6 +18,8 @@ namespace PetChests
         private static ModContext _context;
         private static Harmony _harmony;
         private static Timer _patchTimer;
+        private static PetChestsConfig _config;
+        private static bool _pendingHint;
 
         // Config
         internal static bool Enabled = true;
@@ -27,8 +29,15 @@ namespace PetChests
         {
             _context = context;
             _log = context.Logger;
+            _config = context.GetConfig<PetChestsConfig>();
 
             LoadConfig();
+
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _log.Info("PetChests: dedicated server — skipping client init");
+                return;
+            }
 
             _log.Info("Pet Chests initializing...");
 
@@ -129,8 +138,9 @@ namespace PetChests
 
         private void LoadConfig()
         {
-            Enabled = _context.Config.Get("enabled", true);
-            InteractionRange = _context.Config.Get("interactionRange", 200);
+            if (_config == null) return;
+            Enabled = _config.Enabled;
+            InteractionRange = _config.InteractionRange;
         }
 
         public void OnConfigChanged()
@@ -139,15 +149,24 @@ namespace PetChests
             _log.Info($"Config reloaded - Enabled: {Enabled}, Range: {InteractionRange}");
         }
 
+        public void OnContentReady(ModContext context) { }
+
         public void OnWorldLoad()
         {
             PetInteraction.Reset();
             _log.Info("World loaded - interaction state reset");
+
+            // Schedule first-run hint if not yet shown
+            if (_config != null && !_config.ShownHint)
+            {
+                _pendingHint = true;
+            }
         }
 
         public void OnWorldUnload()
         {
             PetInteraction.Reset();
+            _pendingHint = false;
         }
 
         public void Unload()
@@ -155,6 +174,7 @@ namespace PetChests
             _patchTimer?.Dispose();
             _harmony?.UnpatchAll("com.terrariamodder.petchests");
             _patchTimer = null;
+            _updateCount = 0;
             _log.Info("Pet Chests unloaded");
         }
 
@@ -256,6 +276,29 @@ namespace PetChests
             {
                 if (Main.gameMenu) return;
                 if (i != Main.myPlayer) return;
+
+                // Show first-run hint once the player is in-world
+                if (_pendingHint)
+                {
+                    _pendingHint = false;
+                    try
+                    {
+                        var newText = typeof(Main).GetMethod("NewText",
+                            BindingFlags.Public | BindingFlags.Static, null,
+                            new[] { typeof(string), typeof(byte), typeof(byte), typeof(byte) }, null);
+                        newText?.Invoke(null, new object[] {
+                            "[Pet Chests] Tip: Right-click your summoned pet to open piggy bank!",
+                            (byte)180, (byte)220, (byte)255
+                        });
+                        if (_config != null)
+                        {
+                            _config.ShownHint = true;
+                            _config.Save();
+                        }
+                        _log?.Info("First-run hint shown");
+                    }
+                    catch { }
+                }
 
                 // Set interactible flags for cosmetic pets
                 PetInteraction.SetInteractableFlags(__instance);

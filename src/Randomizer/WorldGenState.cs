@@ -219,7 +219,7 @@ namespace Randomizer
         private static void ParseJson(string json, out int seed, Dictionary<string, bool> modules)
         {
             seed = 0;
-            var matches = Regex.Matches(json, @"""(\w+)""\s*:\s*(\w+)");
+            var matches = Regex.Matches(json, @"""(\w+)""\s*:\s*(-?\w+)");
             foreach (Match m in matches)
             {
                 string key = m.Groups[1].Value;

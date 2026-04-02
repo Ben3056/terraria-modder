@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using TerrariaModder.Core.Logging;
 
@@ -27,7 +28,9 @@ namespace TerrariaModder.Core.Assets
         private static bool _patchesApplied;
         private static bool _texturesLoaded;
         private static int _textureRetryCount;
-        private const int MAX_TEXTURE_RETRIES = 300; // ~5 seconds at 60fps
+        private static int _textureStableFrames;
+        private const int STABLE_FRAMES_REQUIRED = 5; // 5 consecutive checks with no overwrites → done
+        private const int MAX_TEXTURE_RETRIES = 300;  // safety ceiling ~5s at 60fps
 
         /// <summary>Whether texture injection is complete (async loader finished).</summary>
         public static bool TexturesStable => _texturesLoaded;
@@ -45,31 +48,61 @@ namespace TerrariaModder.Core.Assets
             AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
             {
                 var ex = args.ExceptionObject as Exception;
-                _log?.Error($"[AssetSystem] UNHANDLED EXCEPTION: {ex?.Message}");
-                _log?.Error($"[AssetSystem] Stack: {ex?.StackTrace}");
-                if (ex?.InnerException != null)
-                    _log?.Error($"[AssetSystem] Inner: {ex.InnerException.Message}\n{ex.InnerException.StackTrace}");
+                if (ex != null)
+                {
+                    // Log full ToString() which includes type, message, and complete stack with all frames
+                    _log?.Error($"[AssetSystem] UNHANDLED EXCEPTION:\n{ex}");
+                    // Walk inner exceptions
+                    var inner = ex.InnerException;
+                    int depth = 0;
+                    while (inner != null && depth < 5)
+                    {
+                        _log?.Error($"[AssetSystem] INNER[{depth}]:\n{inner}");
+                        inner = inner.InnerException;
+                        depth++;
+                    }
+                }
+                else
+                {
+                    _log?.Error($"[AssetSystem] UNHANDLED EXCEPTION (non-Exception): {args.ExceptionObject}");
+                }
             };
 
             // Read vanilla ItemID.Count before anything modifies it
             int vanillaCount = ReadVanillaItemCount();
             _log?.Info($"[AssetSystem] Vanilla ItemID.Count = {vanillaCount}");
 
-            // Initialize subsystems
+            // Initialize subsystems — always (server + client)
             ItemRegistry.Initialize(logger, vanillaCount);
+
+            // Register ItemRegistry with the ContentRegistry coordinator.
+            // Future content types (tiles, NPCs) register their adapters here too.
+            ContentRegistry.Register(new ItemRegistry.Adapter());
             ModdataFile.Initialize(logger);
-            TextureLoader.Initialize(logger);
             SetDefaultsPatch.Initialize(logger);
-            LangPatches.Initialize(logger);
-            TooltipPatches.Initialize(logger);
-            PlayerSavePatches.Initialize(logger);
             WorldSavePatches.Initialize(logger);
-            RecipeRegistrar.Initialize(logger);
-            ContentPatches.Initialize(logger);
-            ItemBehaviorPatches.Initialize(logger);
-            ItemProtectionPatches.Initialize(logger);
-            DrawPatches.Initialize(logger);
-            PendingItemsUI.Initialize(logger);
+            ShimmerRegistry.Initialize(logger);
+
+            // LangPatches runs on ALL processes — server needs item.Name to be non-empty
+            // for custom items, otherwise NetMessage.SendData(5) resets them to air.
+            LangPatches.Initialize(logger);
+
+            // PlayerSavePatches runs on ALL processes — server needs to load custom items
+            // from .plr sidecar files so they survive H&P inventory sync. No XNA dependency.
+            PlayerSavePatches.Initialize(logger);
+
+            // Client-only subsystems (no XNA / UI / texture access on dedicated server)
+            if (!PluginLoader.IsDedicatedServer)
+            {
+                TextureLoader.Initialize(logger);
+                TooltipPatches.Initialize(logger);
+                RecipeRegistrar.Initialize(logger);
+                ContentPatches.Initialize(logger);
+                ItemBehaviorPatches.Initialize(logger);
+                ItemProtectionPatches.Initialize(logger);
+                DrawPatches.Initialize(logger);
+                PendingItemsUI.Initialize(logger);
+            }
 
             _initialized = true;
             _log?.Info("[AssetSystem] Initialized");
@@ -84,47 +117,88 @@ namespace TerrariaModder.Core.Assets
 
             try
             {
-                // Step 1: Assign deterministic runtime types
-                ItemRegistry.AssignRuntimeTypes();
+                // Step 1: Assign deterministic runtime types for all content types
+                ContentRegistry.AssignAllRuntimeTypes();
 
                 // Apply protection patches unconditionally — protect even if 0 custom
                 // items are registered now, since items may exist from a previous session
                 ItemProtectionPatches.ApplyPatches();
 
-                if (ItemRegistry.Count == 0)
+                if (ContentRegistry.TotalCount == 0)
                 {
-                    _log?.Info("[AssetSystem] No custom items registered, skipping remaining patches");
+                    _log?.Info("[AssetSystem] No custom content registered, skipping remaining patches");
                     _patchesApplied = true;
                     return;
                 }
 
-                // Step 1: Patch save methods BEFORE TypeExtension resizes arrays
-                // (Harmony can't rewrite SavePlayer/LoadPlayer IL after array modifications)
-                PlayerSavePatches.ApplyPatches();
+                // Step 2: Patch world save BEFORE TypeExtension resizes arrays.
+                // WorldSavePatches always runs — dedicated server owns Main.chest[].
+                // PlayerSavePatches is client-only — clients save their own inventories.
                 WorldSavePatches.ApplyPatches();
 
-                // Step 2: Extend type system (resize arrays, NOT ItemID.Count)
-                int newCount = ItemRegistry.VanillaItemCount + ItemRegistry.Count + 64;
-                TypeExtension.Apply(_log, newCount);
+                // Step 3: Extend type system (resize arrays, NOT ItemID.Count).
+                // FNV-1a hash IDs live in [VanillaItemCount, 32767) — arrays extended to 32767.
+                // The descriptor lists the Sets class to scan + named fields to resize explicitly.
+                var descriptor = new ContentTypeDescriptor
+                {
+                    IdClass = typeof(Terraria.ID.ItemID),
+                    VanillaCount = ItemRegistry.VanillaItemCount,
+                    ExtendedCount = 32767,
+                    AdditionalFields = new[]
+                    {
+                        // TextureAssets: Item textures and flame overlays
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.GameContent.TextureAssets), "Item"),
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.GameContent.TextureAssets), "ItemFlame"),
+                        // Lang caches: display name and tooltip text
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.Lang), "_itemNameCache"),
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.Lang), "_itemTooltipCache"),
+                        // Main: animation data
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.Main), "itemAnimations"),
+                        // Item: staff and claw bool arrays indexed by type
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.Item), "staff"),
+                        new ContentTypeDescriptor.NamedField(typeof(Terraria.Item), "claw"),
+                    }
+                };
+                TypeExtension.Apply(_log, descriptor);
 
-                // Step 3: Apply remaining patches
+                // Invalidate any cached array refs that TypeExtension may have resized
+                LangPatches.InvalidateCaches();
+                SetDefaultsPatch.InvalidateMaterialCache();
+
+                // J3: Shimmer registry — server-safe (shimmer transforms run server-side in multiplayer)
+                ShimmerRegistry.ApplyPatches();
+
+                // SetDefaultsPatch runs on ALL processes (including dedServ) — required for custom items
+                // in chests to survive world load (Item.SetDefaults intercept). No XNA dependency.
                 SetDefaultsPatch.ApplyPatches();
+
+                // LangPatches runs on ALL processes — server needs item.Name for custom items
+                // to be non-empty, otherwise NetMessage.SendData(5) resets them to air (type 0).
                 LangPatches.ApplyPatches();
-                TooltipPatches.ApplyPatches();
-                DrawPatches.ApplyPatches();
 
-                // Step 4: Populate ContentSamples.ItemsByType with custom items
-                // MUST happen after SetDefaultsPatch so SetDefaults works for custom types.
-                // Item.OriginalRarity/OriginalDamage/OriginalDefense access this dictionary
-                // and crash with KeyNotFoundException if our types aren't present.
-                PopulateContentSamples();
+                // PlayerSavePatches runs on ALL processes — server needs to extract/inject
+                // custom items from .plr sidecar files during H&P player sync.
+                PlayerSavePatches.ApplyPatches();
 
-                RecipeRegistrar.ApplyPatches();
-                ContentPatches.ApplyPatches();
-                ItemBehaviorPatches.ApplyPatches();
+                // Step 3: Client-only patches (XNA / texture / UI / recipe systems not present on dedicated server)
+                if (!PluginLoader.IsDedicatedServer)
+                {
+                    TooltipPatches.ApplyPatches();
+                    DrawPatches.ApplyPatches();
+
+                    // Step 4: Populate ContentSamples.ItemsByType with custom items
+                    // MUST happen after SetDefaultsPatch so SetDefaults works for custom types.
+                    // Item.OriginalRarity/OriginalDamage/OriginalDefense access this dictionary
+                    // and crash with KeyNotFoundException if our types aren't present.
+                    PopulateContentSamples();
+
+                    RecipeRegistrar.ApplyPatches();
+                    ContentPatches.ApplyPatches();
+                    ItemBehaviorPatches.ApplyPatches();
+                }
 
                 _patchesApplied = true;
-                _log?.Info($"[AssetSystem] All patches applied ({ItemRegistry.Count} custom items)");
+                _log?.Info($"[AssetSystem] All patches applied ({ContentRegistry.TotalCount} custom items)");
             }
             catch (Exception ex)
             {
@@ -162,9 +236,10 @@ namespace TerrariaModder.Core.Assets
 
         /// <summary>
         /// Called each frame via FrameEvents.OnPostUpdate.
-        /// Re-injects cached textures periodically to survive the async texture loader
-        /// (AssetInitializer.LoadTextures) which iterates TextureAssets.Item.Length
-        /// and overwrites our custom entries with null/failed Assets.
+        /// Verifies custom texture slots are still intact (they should be — DrawPatches.LoadItem_Prefix
+        /// already blocks vanilla LoadItem for custom types). If a slot was overwritten for any
+        /// unexpected reason, re-injects from cache. Once STABLE_FRAMES_REQUIRED consecutive checks
+        /// pass cleanly, marks textures as stable and stops polling.
         /// </summary>
         public static void OnUpdate()
         {
@@ -177,15 +252,34 @@ namespace TerrariaModder.Core.Assets
 
             _textureRetryCount++;
 
-            // Re-inject cached textures every 10 frames (~167ms)
-            if (_textureRetryCount % 10 == 0)
-                TextureLoader.ReinjectCachedTextures();
+            // Check every 10 frames (~167ms) — no need for every-frame polling
+            if (_textureRetryCount % 10 != 0) return;
 
+            bool stable = TextureLoader.VerifyTextures();
+
+            if (stable)
+            {
+                _textureStableFrames++;
+                if (_textureStableFrames >= STABLE_FRAMES_REQUIRED)
+                {
+                    _texturesLoaded = true;
+                    _log?.Info($"[AssetSystem] Texture injection stable after {_textureRetryCount} frames");
+                }
+            }
+            else
+            {
+                // Unexpected overwrite — re-inject and reset stability counter
+                _textureStableFrames = 0;
+                TextureLoader.ReinjectCachedTextures();
+                _log?.Debug($"[AssetSystem] Texture overwrite detected at frame {_textureRetryCount} — re-injecting");
+            }
+
+            // Safety ceiling: stop retrying regardless of stability
             if (_textureRetryCount >= MAX_TEXTURE_RETRIES)
             {
-                TextureLoader.ReinjectCachedTextures();
+                if (!stable) TextureLoader.ReinjectCachedTextures();
                 _texturesLoaded = true;
-                _log?.Info("[AssetSystem] Texture re-injection complete");
+                _log?.Info($"[AssetSystem] Texture stability check ceiling reached ({MAX_TEXTURE_RETRIES} frames)");
             }
         }
 
@@ -320,6 +414,24 @@ namespace TerrariaModder.Core.Assets
         public static void RegisterShopItem(ShopDefinition shop)
         {
             ContentPatches.RegisterShopItem(shop);
+        }
+
+        /// <summary>
+        /// Register a shimmer transform.
+        /// </summary>
+        public static void RegisterShimmer(ShimmerDefinition shimmer)
+        {
+            ShimmerRegistry.Register(shimmer);
+        }
+
+        /// <summary>
+        /// Register a global tooltip modifier callback.
+        /// Only called client-side (no tooltip rendering on server).
+        /// </summary>
+        public static void RegisterTooltipModifier(Action<int, List<string>> modifier)
+        {
+            if (!PluginLoader.IsDedicatedServer)
+                TooltipRegistry.Register(modifier);
         }
 
         /// <summary>

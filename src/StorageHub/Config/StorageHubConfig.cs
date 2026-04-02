@@ -294,6 +294,12 @@ namespace StorageHub.Config
             return Path.Combine(_modFolder, "worlds", _currentWorldName, "world.json");
         }
 
+        /// <summary>Path to the per-world folder (for migration sidecars etc.)</summary>
+        public string GetWorldFolder()
+        {
+            return Path.Combine(_modFolder, "worlds", _currentWorldName);
+        }
+
         private string GetCharacterConfigPath()
         {
             return Path.Combine(_modFolder, "characters", $"{_currentCharacterName}.json");
@@ -629,8 +635,7 @@ namespace StorageHub.Config
         Name,       // Alphabetical by name
         Stack,      // By stack size (highest first)
         Rarity,     // By rarity (highest first)
-        Type,       // By item type ID
-        Recent      // Most recently registered first
+        Type        // By item type ID
     }
 
     /// <summary>

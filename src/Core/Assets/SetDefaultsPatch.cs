@@ -23,6 +23,7 @@ namespace TerrariaModder.Core.Assets
         private static ILogger _log;
         private static bool _applied;
         private static bool _firstCallLogged;
+        private static Type _serverItemType; // TerrariaServer.exe's Item type (different from Terraria.exe's)
 
         public static void Initialize(ILogger logger)
         {
@@ -73,8 +74,49 @@ namespace TerrariaModder.Core.Assets
                     BindingFlags.NonPublic | BindingFlags.Static);
 
                 _harmony.Patch(setDefaultsMethod, prefix: new HarmonyMethod(prefix));
-                _applied = true;
                 _log?.Info("[SetDefaultsPatch] Patched Item.SetDefaults");
+
+                // Also patch TerrariaServer.exe's Item.SetDefaults (for dedicated server).
+                // On ded server, Item.NewItem creates items using TerrariaServer's Item class.
+                // Without this, SetDefaults(customType) falls through to vanilla which sets type=0 (air).
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    string asmName = asm.GetName().Name;
+                    if (asmName != "TerrariaServer" && asmName != "Terraria") continue;
+                    var serverItemType = asm.GetType("Terraria.Item");
+                    if (serverItemType == null || serverItemType == itemType) continue;
+
+                    MethodInfo serverSetDefaults = null;
+                    foreach (var m in serverItemType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (m.Name != "SetDefaults") continue;
+                        var parms = m.GetParameters();
+                        if (parms.Length == 2 && parms[0].ParameterType == typeof(int))
+                        {
+                            serverSetDefaults = m;
+                            break;
+                        }
+                    }
+                    if (serverSetDefaults == null)
+                    {
+                        serverSetDefaults = serverItemType.GetMethod("SetDefaults",
+                            BindingFlags.Public | BindingFlags.Instance, null,
+                            new[] { typeof(int) }, null);
+                    }
+                    if (serverSetDefaults != null && serverSetDefaults != setDefaultsMethod)
+                    {
+                        // Use a separate prefix that takes object __instance instead of Item __instance.
+                        // TerrariaServer.Item is a different Type from Terraria.Item — Harmony can't
+                        // inject cross-assembly typed parameters. The server prefix uses reflection.
+                        var serverPrefix = typeof(SetDefaultsPatch).GetMethod(nameof(ServerPrefix),
+                            BindingFlags.NonPublic | BindingFlags.Static);
+                        _serverItemType = serverItemType;
+                        _harmony.Patch(serverSetDefaults, prefix: new HarmonyMethod(serverPrefix));
+                        _log?.Info($"[SetDefaultsPatch] Patched Item.SetDefaults ({asmName} assembly, server prefix)");
+                    }
+                }
+
+                _applied = true;
             }
             catch (Exception ex)
             {
@@ -98,7 +140,33 @@ namespace TerrariaModder.Core.Assets
             if (Type < ItemRegistry.VanillaItemCount) return true;
 
             var definition = ItemRegistry.GetDefinition(Type);
-            if (definition == null) return true; // Unknown type, let vanilla handle (will become air)
+            if (definition == null)
+            {
+                // I3: Check if this is a KnownUnknown — server-known Optional mod item client doesn't have
+                if (ItemRegistry.IsKnownUnknown(Type, out string fullId))
+                {
+                    try
+                    {
+                        __instance.ResetStats(Type);
+                        __instance.type = Type;
+                        __instance.stack = 1;
+                        __instance.maxStack = 1;
+                        __instance.width = 20;
+                        __instance.height = 20;
+                        __instance.rare = 0;
+                        __instance.value = 0;
+                        SetItemName(Type, $"[{fullId}]");
+                        SetItemTooltip(Type, new[] { $"This item requires [{fullId.Split(':')[0]}] to be installed." });
+                        __instance.RebuildTooltip();
+                        return false; // skip vanilla (which would set type to 0)
+                    }
+                    catch (Exception ex)
+                    {
+                        _log?.Debug($"[SetDefaultsPatch] KnownUnknown placeholder error for type {Type}: {ex.Message}");
+                    }
+                }
+                return true; // Unknown type, let vanilla handle (will become air)
+            }
 
             try
             {
@@ -130,6 +198,123 @@ namespace TerrariaModder.Core.Assets
                 _log?.Error($"[SetDefaultsPatch] Error for type {Type}: {ex.Message}");
                 return true; // Fall through to vanilla (will become air)
             }
+        }
+
+        /// <summary>
+        /// Server prefix for TerrariaServer.exe's Item.SetDefaults. Uses object __instance
+        /// and reflection because TerrariaServer.Item is a different Type from Terraria.Item.
+        /// Harmony can't inject cross-assembly typed parameters.
+        /// </summary>
+        private static bool ServerPrefix(object __instance, int Type)
+        {
+            if (Type < ItemRegistry.VanillaItemCount) return true;
+
+            var definition = ItemRegistry.GetDefinition(Type);
+            if (definition == null) return true; // Unknown type, let vanilla handle
+
+            try
+            {
+                var itemType = __instance.GetType();
+                _log?.Info($"[SetDefaultsPatch] ServerPrefix: Type={Type}, itemType={itemType.FullName}");
+
+                // Skip ResetStats — it may access OOB arrays on TerrariaServer.
+                // Just set type and the properties we need directly.
+                var typeField = itemType.GetField("type", BindingFlags.Public | BindingFlags.Instance);
+                typeField?.SetValue(__instance, Type);
+
+                // Apply properties via reflection
+                ApplyDefinitionReflection(__instance, itemType, definition);
+
+                // Set material
+                var materialField = itemType.GetField("material", BindingFlags.Public | BindingFlags.Instance);
+                materialField?.SetValue(__instance, definition.Material);
+
+                // Ensure stack >= 1
+                var stackField = itemType.GetField("stack", BindingFlags.Public | BindingFlags.Instance);
+                if (stackField != null)
+                {
+                    int stack = (int)stackField.GetValue(__instance);
+                    if (stack <= 0) stackField.SetValue(__instance, 1);
+                }
+
+                _log?.Info($"[SetDefaultsPatch] ServerPrefix applied for type {Type}: '{definition.DisplayName}'");
+                return false; // Skip vanilla
+            }
+            catch (Exception ex)
+            {
+                var inner = ex.InnerException ?? ex;
+                _log?.Error($"[SetDefaultsPatch] ServerPrefix error for type {Type}: {inner.GetType().Name}: {inner.Message} | Stack: {inner.StackTrace ?? "null"} | Outer: {ex.StackTrace ?? "null"}");
+                return true;
+            }
+        }
+
+        private static void ApplyDefinitionReflection(object item, Type itemType, ItemDefinition def)
+        {
+            void SetInt(string name, int val) { itemType.GetField(name, BindingFlags.Public | BindingFlags.Instance)?.SetValue(item, val); }
+            void SetFloat(string name, float val) { itemType.GetField(name, BindingFlags.Public | BindingFlags.Instance)?.SetValue(item, val); }
+            void SetBool(string name, bool val) { itemType.GetField(name, BindingFlags.Public | BindingFlags.Instance)?.SetValue(item, val); }
+
+            // Combat
+            SetInt("damage", def.Damage);
+            SetFloat("knockBack", def.KnockBack);
+            SetInt("useTime", def.UseTime);
+            SetInt("useAnimation", def.UseAnimation);
+            SetInt("useStyle", def.UseStyle);
+            SetInt("crit", def.Crit);
+            SetInt("mana", def.Mana);
+            SetBool("autoReuse", def.AutoReuse);
+
+            // Damage types
+            SetBool("melee", def.Melee);
+            SetBool("ranged", def.Ranged);
+            SetBool("magic", def.Magic);
+            SetBool("summon", def.Summon);
+
+            // Projectile
+            SetInt("shoot", def.Shoot);
+            SetFloat("shootSpeed", def.ShootSpeed);
+
+            // Defense / Equipment
+            SetInt("defense", def.Defense);
+            SetBool("accessory", def.Accessory);
+            SetBool("vanity", def.Vanity);
+            if (def.HeadSlot >= 0) SetInt("headSlot", def.HeadSlot);
+            if (def.BodySlot >= 0) SetInt("bodySlot", def.BodySlot);
+            if (def.LegSlot >= 0) SetInt("legSlot", def.LegSlot);
+
+            // Consumable / Potion
+            SetInt("maxStack", def.MaxStack);
+            SetBool("consumable", def.Consumable);
+            SetBool("potion", def.Potion);
+            SetInt("healLife", def.HealLife);
+            SetInt("healMana", def.HealMana);
+            SetInt("buffType", def.BuffType);
+            SetInt("buffTime", def.BuffTime);
+
+            // Ammo
+            SetInt("ammo", def.Ammo);
+            SetInt("useAmmo", def.UseAmmo);
+
+            // Placement
+            SetInt("createTile", def.CreateTile);
+            SetInt("createWall", def.CreateWall);
+            SetInt("placeStyle", def.PlaceStyle);
+
+            // Visual
+            SetInt("width", def.Width);
+            SetInt("height", def.Height);
+            SetFloat("scale", def.Scale);
+            SetInt("holdStyle", def.HoldStyle);
+            SetBool("noUseGraphic", def.NoUseGraphic);
+            SetBool("noMelee", def.NoMelee);
+            SetBool("channel", def.Channel);
+
+            // Economy
+            SetInt("rare", def.Rarity);
+            SetInt("value", def.Value);
+
+            // Skip name/tooltip on server — Lang caches are sized to ItemID.Count in
+            // TerrariaServer.exe (not extended). Server doesn't need display strings.
         }
 
         private static void ApplyDefinition(Item item, ItemDefinition def)
@@ -196,13 +381,17 @@ namespace TerrariaModder.Core.Assets
             // Set name and tooltip via reflection (Lang caches)
             SetItemName(item.type, def.DisplayName);
             SetItemTooltip(item.type, def.Tooltip);
-            _log?.Info($"[SetDefaultsPatch] Applied def for type {item.type}: name='{def.DisplayName}', tooltip={def.Tooltip?.Length ?? 0} lines");
+            _log?.Debug($"[SetDefaultsPatch] Applied def for type {item.type}: name='{def.DisplayName}', tooltip={def.Tooltip?.Length ?? 0} lines");
 
             // Ensure stack is at least 1 for non-air items
             if (item.stack <= 0) item.stack = 1;
         }
 
         private static bool[] _materialSet;
+
+        /// <summary>Clear cached material set ref so it's re-fetched after TypeExtension resizes it.</summary>
+        public static void InvalidateMaterialCache() { _materialSet = null; }
+
         private static bool[] GetMaterialSet()
         {
             if (_materialSet != null) return _materialSet;

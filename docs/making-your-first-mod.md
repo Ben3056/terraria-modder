@@ -62,7 +62,7 @@ Create `MyFirstMod.csproj`:
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>..\..\Terraria\Mods\Libs\0Harmony.dll</HintPath>
+      <HintPath>..\..\Terraria\TerrariaModder\core\deps\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Microsoft.Xna.Framework.Game, Version=4.0.0.0, Culture=neutral, PublicKeyToken=842cf8be1de50553">
@@ -95,21 +95,6 @@ Create `manifest.json`:
   "entry_dll": "MyFirstMod.dll",
   "icon": "icon.png",
 
-  "config_schema": {
-    "greeting": {
-      "type": "string",
-      "default": "Hello, Terraria!",
-      "label": "Greeting Message",
-      "description": "Message shown when entering a world"
-    },
-    "show_on_enter": {
-      "type": "bool",
-      "default": true,
-      "label": "Show on World Enter",
-      "description": "Show greeting when entering a world"
-    }
-  },
-
   "keybinds": [
     {
       "id": "show-greeting",
@@ -134,7 +119,6 @@ Create `manifest.json`:
 | `dependencies` | No | Required mod IDs (loaded first) |
 | `optional_dependencies` | No | Optional mod IDs (loaded first if present) |
 | `incompatible_with` | No | Mod IDs that conflict with this mod |
-| `config_schema` | No | User-configurable settings |
 | `keybinds` | No | Rebindable hotkeys |
 | `framework_version` | No | Minimum required TerrariaModder version |
 | `terraria_version` | No | Minimum Terraria version |
@@ -151,11 +135,20 @@ Create `Mod.cs`:
 ```csharp
 using Terraria;
 using TerrariaModder.Core;
+using TerrariaModder.Core.Config;
 using TerrariaModder.Core.Logging;
 
 namespace MyFirstMod
 {
-    public class Mod : IMod
+    // Config class — properties auto-generate F6 menu UI and save to core/configs/
+    public class MyFirstModConfig : ModConfig
+    {
+        [Client] public bool ShowOnEnter { get; set; } = true;
+        [Client] public string GreetingMessage { get; set; } = "Hello, Terraria!";
+    }
+
+    // IMod = required. IModLifecycle = optional (world load/unload hooks).
+    public class Mod : IMod, IModLifecycle
     {
         // These must match manifest.json
         public string Id => "my-first-mod";
@@ -164,11 +157,13 @@ namespace MyFirstMod
 
         private ILogger _log;
         private ModContext _context;
+        private MyFirstModConfig _config;
 
         public void Initialize(ModContext context)
         {
             _log = context.Logger;
             _context = context;
+            _config = context.GetConfig<MyFirstModConfig>();
 
             // Register our keybind
             context.RegisterKeybind("show-greeting", "Show Greeting",
@@ -177,15 +172,16 @@ namespace MyFirstMod
             _log.Info("My First Mod initialized!");
         }
 
+        public void OnContentReady(ModContext context)
+        {
+            // Called after all mods are initialized and content IDs are assigned.
+            // Use this for cross-mod lookups or anything that depends on other mods being loaded.
+        }
+
         public void OnWorldLoad()
         {
-            // Check if we should show greeting on world enter
-            bool showOnEnter = _context.Config?.Get<bool>("show_on_enter") ?? true;
-
-            if (showOnEnter)
-            {
+            if (_config.ShowOnEnter)
                 ShowGreeting();
-            }
         }
 
         public void OnWorldUnload()
@@ -266,12 +262,21 @@ Terraria/TerrariaModder/core/logs/terrariamodder.log
 
 Look for `[my-first-mod]` entries to see your mod's log messages.
 
+## Notes for Existing Modders
+
+If you're updating a mod from an earlier Core version:
+
+- **Recompile against new Core** — mods must be recompiled against Core 0.4.0+. Old DLLs that only use basic `IMod` methods will still load, but mods using changed APIs (like the old `IModConfig` interface) will fail gracefully and need a recompile.
+- **Config migration is automatic** — if your mod used the old `config_schema` / `config.json` system, user settings migrate automatically to the new `core/configs/` location. We encourage adopting the new `ModConfig` class for free F6 UI, multiplayer scoping, and validation. The legacy migration will eventually be removed.
+- **IModLifecycle is optional** — `OnContentReady`, `OnWorldLoad`, and `OnWorldUnload` moved from `IMod` to the optional `IModLifecycle` interface. Add `IModLifecycle` to your class declaration to use them.
+- **Multiplayer** — add `"multiplayer": "client-only"` (or `"required"` / `"optional"`) to your manifest.json. See [Publishing](publishing-your-mod.md) for details.
+
 ## Next Steps
 
 Now that you have a working mod:
 
 1. **Add a UI panel** - Use `DraggablePanel` + `StackLayout` from the [Widget Library](core-api-reference.md#widget-library) for instant drag, close, z-order
-2. **Add Harmony patches** - See [Harmony Basics](harmony-basics.md) for patching game behavior. Attribute-based patches are auto-applied; manual patches go in `OnGameReady()` [lifecycle hooks](core-api-reference.md#injector-lifecycle-hooks)
+2. **Add Harmony patches** - See [Harmony Basics](harmony-basics.md) for patching game behavior. Apply patches manually with `_harmony.Patch()` in the `OnGameReady()` [lifecycle hook](core-api-reference.md#injector-lifecycle-hooks)
 3. **Add more features** - See [Tested Patterns](tested-patterns.md) for common techniques
 4. **Study real mods** - Read the [Mod Walkthroughs](walkthroughs.md)
 5. **Publish** - See [Publishing Your Mod](publishing-your-mod.md)
@@ -288,8 +293,8 @@ The `Id` property in your Mod class must exactly match the `id` in manifest.json
 
 ### Config not working
 
-1. Make sure config key names match between manifest.json and your code
-2. Delete `config.json` to reset to defaults
+1. Make sure your `ModConfig` subclass properties have `[Client]` or `[Server]` attributes
+2. Delete the config file in `TerrariaModder/core/configs/` to reset to defaults
 3. Check logs for config parsing errors
 
 ### Keybind not working

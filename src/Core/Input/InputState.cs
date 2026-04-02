@@ -1,5 +1,6 @@
 using Microsoft.Xna.Framework.Input;
 using Terraria;
+using Terraria.GameInput;
 using TerrariaModder.Core.Reflection;
 
 namespace TerrariaModder.Core.Input
@@ -185,7 +186,8 @@ namespace TerrariaModder.Core.Input
         /// <summary>Check if input should be blocked (chat open, menu, etc).</summary>
         public static bool ShouldBlockInput()
         {
-            return Main.drawingPlayerChat || Main.editSign || Main.editChest || Main.gameMenu;
+            return Main.drawingPlayerChat || Main.editSign || Main.editChest || Main.gameMenu
+                || Main.blockInput || PlayerInput.WritingText;
         }
     }
 }

@@ -523,6 +523,13 @@ namespace AdminPanel
 
         private static void DoSpawn(int worldX, int worldY)
         {
+            if (Main.netMode == 1)
+            {
+                // MP client: send spawn request to server
+                TerrariaModder.Core.Net.NetSync.SendServerCommandRequest("spawnnpc", $"{_selectedId}:{worldX}:{worldY}");
+                return;
+            }
+
             var source = new EntitySource_SpawnNPC();
             int npcIndex = NPC.NewNPC(source, worldX, worldY, _selectedId, Target: Main.myPlayer);
 

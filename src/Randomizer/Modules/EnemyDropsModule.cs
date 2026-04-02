@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using HarmonyLib;
+using Terraria;
 using Terraria.GameContent.ItemDropRules;
 
 namespace Randomizer.Modules
@@ -15,9 +16,11 @@ namespace Randomizer.Modules
         public override string Name => "Enemy Drop Shuffle";
         public override string Description => "Enemies and bosses drop random items";
         public override string Tooltip => "Each enemy drop is randomly replaced with any item in the game. Every kill is a surprise — no fixed mapping.";
-        private const int MaxItemId = 6144; // ItemID.Count=6145, last valid=6144 (verified from decomp)
+        private static readonly int MaxItemId = Terraria.ID.ItemID.Count - 1;
 
         internal static EnemyDropsModule Instance;
+        private static MethodInfo _patchedDropItemFromNPC;
+        private static MethodInfo _patchedDropLocal;
 
         public override void BuildShuffleMap()
         {
@@ -49,6 +52,7 @@ namespace Randomizer.Modules
                     var prefix = typeof(EnemyDropsModule).GetMethod(nameof(DropItemFromNPC_Prefix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(dropItemFromNPC, prefix: new HarmonyMethod(prefix));
+                    _patchedDropItemFromNPC = dropItemFromNPC;
                     Log.Info("[Randomizer] Enemy Drops: patched CommonCode.DropItemFromNPC");
                 }
                 else
@@ -72,6 +76,7 @@ namespace Randomizer.Modules
                     var prefix = typeof(EnemyDropsModule).GetMethod(nameof(DropItemLocal_Prefix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(dropLocal, prefix: new HarmonyMethod(prefix));
+                    _patchedDropLocal = dropLocal;
                     Log.Info("[Randomizer] Enemy Drops: patched CommonCode.DropItemLocalPerClient");
                 }
             }
@@ -87,6 +92,7 @@ namespace Randomizer.Modules
         public static void DropItemFromNPC_Prefix(ref int itemId)
         {
             if (Instance == null || !Instance.Enabled) return;
+            if (Main.netMode != 0) return; // SP only — MP would desync RNG between server/clients
             if (itemId <= 0) return;
             itemId = Instance.GetRandomInRange(1, MaxItemId + 1);
         }
@@ -97,13 +103,23 @@ namespace Randomizer.Modules
         public static void DropItemLocal_Prefix(ref int itemId)
         {
             if (Instance == null || !Instance.Enabled) return;
+            if (Main.netMode != 0) return; // SP only
             if (itemId <= 0) return;
             itemId = Instance.GetRandomInRange(1, MaxItemId + 1);
         }
 
         public override void RemovePatches(Harmony harmony)
         {
-            // Handled by harmony.UnpatchAll in Mod.Unload
+            if (_patchedDropItemFromNPC != null)
+            {
+                harmony.Unpatch(_patchedDropItemFromNPC, HarmonyPatchType.Prefix, "com.terrariamodder.randomizer");
+                _patchedDropItemFromNPC = null;
+            }
+            if (_patchedDropLocal != null)
+            {
+                harmony.Unpatch(_patchedDropLocal, HarmonyPatchType.Prefix, "com.terrariamodder.randomizer");
+                _patchedDropLocal = null;
+            }
         }
     }
 }

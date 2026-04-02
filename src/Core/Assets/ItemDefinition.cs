@@ -85,6 +85,12 @@ namespace TerrariaModder.Core.Assets
         // Journey Mode
         public int JourneyResearchCount { get; set; } = 1;
 
+        /// <summary>
+        /// Historical full IDs for this item (e.g. "my-mod:dragon-sword" after renaming to "my-mod:dragons-blade").
+        /// Moddata entries with these old IDs resolve to this item. Never reuse an alias for a different item.
+        /// </summary>
+        public List<string> Aliases { get; set; } = new List<string>();
+
         // ── Runtime Behavior Hooks ──
         // All hooks receive Terraria types as object to avoid compile-time XNA dependencies.
 
@@ -159,6 +165,21 @@ namespace TerrariaModder.Core.Assets
         public string ItemId { get; set; }
         /// <summary>Custom price in copper (0 = use item value).</summary>
         public int Price { get; set; }
+        /// <summary>Condition for this item to appear in the shop. Default = Always.</summary>
+        public ShopCondition Condition { get; set; } = ShopCondition.Always;
+    }
+
+    /// <summary>
+    /// Conditions under which a drop fires (Phase J2).
+    /// </summary>
+    [Flags]
+    public enum DropConditions
+    {
+        Always     = 0,
+        ExpertMode = 1,
+        MasterMode = 2,
+        HardMode   = 4,
+        NotNormal  = ExpertMode | MasterMode,
     }
 
     /// <summary>
@@ -166,8 +187,10 @@ namespace TerrariaModder.Core.Assets
     /// </summary>
     public class DropDefinition
     {
-        /// <summary>NPC type ID that drops this item.</summary>
+        /// <summary>NPC type ID that drops this item. Use NpcTypes for multiple NPCs.</summary>
         public int NpcType { get; set; }
+        /// <summary>Multiple NPC type IDs that drop this item (optional, merged with NpcType).</summary>
+        public int[] NpcTypes { get; set; }
         /// <summary>Item: "modid:itemname" for custom, or vanilla item name/ID.</summary>
         public string ItemId { get; set; }
         /// <summary>Drop chance (0.0 to 1.0).</summary>
@@ -176,5 +199,42 @@ namespace TerrariaModder.Core.Assets
         public int MinStack { get; set; } = 1;
         /// <summary>Max stack on drop.</summary>
         public int MaxStack { get; set; } = 1;
+        /// <summary>Conditions that must be met for this drop to fire.</summary>
+        public DropConditions Conditions { get; set; } = DropConditions.Always;
+    }
+
+    /// <summary>
+    /// Conditions under which a shop item appears (Phase J4).
+    /// </summary>
+    public enum ShopCondition
+    {
+        Always,
+        HardMode,
+        PostEyeOfCthulhu,
+        PostSkeletron,
+        PostEvilBoss,      // Eye of World or Brain of Cthulhu
+        PostWallOfFlesh,
+        PostMechBoss,      // Any one of three
+        PostAllMechBosses,
+        PostPlantera,
+        PostGolem,
+        PostMoonLord,
+    }
+
+    /// <summary>
+    /// Shimmer transform definition (Phase J3).
+    /// When InputId is shimmered, it transforms into OutputId.
+    /// Both IDs accept "modid:itemname" (custom) or vanilla item name/type.
+    /// </summary>
+    public class ShimmerDefinition
+    {
+        /// <summary>Input item: "modid:itemname" or vanilla item name/type.</summary>
+        public string InputId { get; set; }
+        /// <summary>Output item: "modid:itemname" or vanilla item name/type.</summary>
+        public string OutputId { get; set; }
+        /// <summary>Input stack consumed per transform.</summary>
+        public int InputStack { get; set; } = 1;
+        /// <summary>Output stack produced per transform.</summary>
+        public int OutputStack { get; set; } = 1;
     }
 }

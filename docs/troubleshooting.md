@@ -73,7 +73,7 @@ Common issues and solutions for TerrariaModder.
 **Check:**
 1. manifest.json exists and is valid JSON
 2. DLL file exists in the mod folder
-3. If mod has `config_schema`, check `enabled` is `true` in config.json
+3. If mod has a config, check `Enabled` is `true` in `core/configs/{mod-id}.client.json`
 4. No JSON syntax errors (missing commas, brackets)
 
 **Validate JSON:**
@@ -176,14 +176,17 @@ public class Mod : IMod
 
 ### Manually editing config files
 
-Config files are stored at:
+Config files are stored in the centralized configs folder:
 ```
-Terraria/TerrariaModder/mods/{mod-id}/config.json
+Terraria/TerrariaModder/core/configs/{mod-id}.client.json    (client settings)
+Terraria/TerrariaModder/core/configs/{mod-id}.server.json    (server settings, admin-controlled)
 ```
 
 For example:
-- `Terraria/TerrariaModder/mods/quick-keys/config.json`
-- `Terraria/TerrariaModder/mods/auto-buffs/config.json`
+- `Terraria/TerrariaModder/core/configs/quick-keys.client.json`
+- `Terraria/TerrariaModder/core/configs/storage-hub.client.json`
+
+Legacy config files (`mods/{mod-id}/config.json`) are automatically migrated on first load.
 
 Keybind overrides are stored at:
 ```
@@ -344,8 +347,7 @@ Something broke - report to mod author with full stack trace.
 ### "Patches not applying"
 
 **Debug:**
-1. **Attribute-based patches:** These are auto-applied by the injector. Check `TerrariaInjector.log` for Harmony patching errors at startup
-2. **Manual patches:** Make sure you're applying them in `OnGameReady()` (not `Initialize()`). Log to confirm it runs
+1. **Manual patches:** Make sure you're applying them in `OnGameReady()` (not `Initialize()`). Log to confirm it runs
 3. Check target method exists (log reflection results)
 4. Verify correct BindingFlags
 5. Harmony ID should be unique

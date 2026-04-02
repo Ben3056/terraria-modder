@@ -9,7 +9,6 @@ using StorageHub.Crafting;
 using StorageHub.UI.Components;
 using StorageHub.UI.Tabs;
 using StorageHub.Relay;
-using TerrariaModder.Core.Config;
 using TerrariaModder.Core.UI.Widgets;
 using TextUtil = TerrariaModder.Core.UI.Widgets.TextUtil;
 using ItemTooltip = TerrariaModder.Core.UI.Widgets.ItemTooltip;
@@ -35,7 +34,7 @@ namespace StorageHub.UI
         private readonly RecursiveCrafter _crafter;
         private readonly RangeCalculator _rangeCalc;
         private readonly ChestPinger _chestPinger;
-        private readonly IModConfig _modConfig;
+        private readonly StorageHubModConfig _modConfig;
 
         // Tab indices
         private const int TabItems = 0;
@@ -49,6 +48,19 @@ namespace StorageHub.UI
         // UI State
         private bool _isOpen = false;
         private int _activeTab = TabItems;
+
+        public int ActiveTab => _activeTab;
+        public string ActiveTabName => _activeTab >= 0 && _activeTab < TabNames.Length ? TabNames[_activeTab] : "?";
+        public void SetActiveTab(int tab)
+        {
+            if (tab >= 0 && tab < TabNames.Length) _activeTab = tab;
+        }
+        public void SetActiveTab(string name)
+        {
+            for (int i = 0; i < TabNames.Length; i++)
+                if (string.Equals(TabNames[i], name, System.StringComparison.OrdinalIgnoreCase))
+                { _activeTab = i; return; }
+        }
 
         // UI Components
         private readonly TextInput _searchInput = new TextInput("Search...", 200);
@@ -93,7 +105,7 @@ namespace StorageHub.UI
 
         public StorageHubUI(ILogger log, IStorageProvider storage, StorageHubConfig config,
             RecipeIndex recipeIndex, CraftabilityChecker craftChecker, RecursiveCrafter crafter,
-            RangeCalculator rangeCalc, IModConfig modConfig)
+            RangeCalculator rangeCalc, StorageHubModConfig modConfig)
         {
             _log = log;
             _storage = storage;
@@ -604,8 +616,7 @@ namespace StorageHub.UI
             DrawItemsSortButton(xPos, y, 80, btnHeight, "Name", SortMode.Name); xPos += 84;
             DrawItemsSortButton(xPos, y, 80, btnHeight, "Stack", SortMode.Stack); xPos += 84;
             DrawItemsSortButton(xPos, y, 80, btnHeight, "Rarity", SortMode.Rarity); xPos += 84;
-            DrawItemsSortButton(xPos, y, 80, btnHeight, "Type", SortMode.Type); xPos += 84;
-            DrawItemsSortButton(xPos, y, 80, btnHeight, "Recent", SortMode.Recent);
+            DrawItemsSortButton(xPos, y, 80, btnHeight, "Type", SortMode.Type);
         }
 
         private void DrawItemsSortButton(int x, int y, int btnWidth, int btnHeight, string text, SortMode mode)
@@ -686,7 +697,6 @@ namespace StorageHub.UI
                     SortMode.Stack => dir * a.Stack.CompareTo(b.Stack),
                     SortMode.Rarity => dir * a.Rarity.CompareTo(b.Rarity),
                     SortMode.Type => dir * a.ItemId.CompareTo(b.ItemId),
-                    SortMode.Recent => 0,
                     _ => dir * string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase)
                 };
             });

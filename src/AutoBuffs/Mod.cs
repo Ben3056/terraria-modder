@@ -8,7 +8,7 @@ using TerrariaModder.Core.Logging;
 
 namespace AutoBuffs
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle
     {
         public string Id => "auto-buffs";
         public string Name => "Auto Furniture Buffs";
@@ -16,6 +16,7 @@ namespace AutoBuffs
 
         private static ILogger _log;
         private static ModContext _context;
+        private static AutoBuffsConfig _config;
         private static Harmony _harmony;
         private static Timer _patchTimer;
         private static int _initDelayFrames = 300;
@@ -35,8 +36,15 @@ namespace AutoBuffs
         {
             _context = context;
             _log = context.Logger;
+            _config = context.GetConfig<AutoBuffsConfig>();
 
             LoadConfig();
+
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _log.Info("AutoBuffs: dedicated server — skipping client init");
+                return;
+            }
 
             _log.Info("Auto Buffs initializing...");
 
@@ -79,17 +87,19 @@ namespace AutoBuffs
             }
         }
 
-        private void LoadConfig()
+        private static void LoadConfig()
         {
-            Enabled = _context.Config.Get("enabled", true);
-            ScanRadius = _context.Config.Get("scanRadius", 40);
-            EnableCrystalBall = _context.Config.Get("crystalBall", true);
-            EnableAmmoBox = _context.Config.Get("ammoBox", true);
-            EnableBewitchingTable = _context.Config.Get("bewitchingTable", true);
-            EnableSharpeningStation = _context.Config.Get("sharpeningStation", true);
-            EnableWarTable = _context.Config.Get("warTable", true);
-            EnableSliceOfCake = _context.Config.Get("sliceOfCake", true);
-            DebugLogging = _context.Config.Get("debugLogging", false);
+            if (_config == null) return;
+
+            Enabled = _config.Enabled;
+            ScanRadius = _config.ScanRadius;
+            EnableCrystalBall = _config.CrystalBall;
+            EnableAmmoBox = _config.AmmoBox;
+            EnableBewitchingTable = _config.BewitchingTable;
+            EnableSharpeningStation = _config.SharpeningStation;
+            EnableWarTable = _config.WarTable;
+            EnableSliceOfCake = _config.SliceOfCake;
+            DebugLogging = _config.DebugLogging;
         }
 
         public void OnConfigChanged()
@@ -97,6 +107,8 @@ namespace AutoBuffs
             LoadConfig();
             _log.Info($"Config reloaded - Enabled: {Enabled}, Radius: {ScanRadius}");
         }
+
+        public void OnContentReady(ModContext context) { }
 
         public void OnWorldLoad()
         {

@@ -1,6 +1,6 @@
 ---
 title: StorageHub Mod - Unified Storage and Crafting for Terraria 1.4.5
-description: Walkthrough of the StorageHub mod for Terraria 1.4.5. Multi-tab storage UI with crafting, shimmer decraft, painting chest, and relay network.
+description: Walkthrough of the StorageHub mod for Terraria 1.4.5. Multi-tab storage UI with crafting, shimmer decraft, mysterious chest, and relay network.
 parent: Walkthroughs
 nav_order: 5.5
 ---
@@ -19,7 +19,7 @@ Press F5 to open a 6-tab panel:
 - **Crafting** - One-click crafting with recursive intermediate crafting support
 - **Recipes** - Full recipe browser showing what creates and uses each item
 - **Shimmer** - Decraft items back into ingredients using shimmer
-- **Unlocks** - Tier progression, station memory, relay management, and painting chest upgrades
+- **Unlocks** - Tier progression, station memory, relay management, and mysterious chest upgrades
 - **Network** - View registered chests and crafting station availability
 
 ## Key Concepts
@@ -293,7 +293,7 @@ StorageHub has several config options beyond the standard `enabled`:
 | `blockHotbarFromCrafting` | bool | false | Protect hotbar slots 1-10 from crafting consumption |
 | `recursiveCrafting` | bool | true | Enable auto-crafting of intermediate ingredients |
 | `recursiveCraftingDepth` | int | 0 | Maximum recursive depth (0 = unlimited) |
-| `paintingChest` | bool | true | Enable the Mysterious Painting feature |
+| `paintingChest` | bool | true | Enable the Mysterious Chest feature |
 
 ## Lessons Learned
 

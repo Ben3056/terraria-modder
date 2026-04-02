@@ -246,8 +246,7 @@ If your code needs both content and patches ready, put it in `OnGameReady` since
 
 | Scenario | Approach |
 |----------|----------|
-| Standard game method patches (Player.Update, Main.DoUpdate, etc.) | **Attribute-based**, auto-applied by injector |
-| Manual patches needing reflection to find methods | **OnGameReady** lifecycle hook |
+| All game method patches | **Manual** `_harmony.Patch()` in **OnGameReady** lifecycle hook |
 | Custom texture loading | **OnGameReady** (content + GraphicsDevice ready) |
 | One-time setup needing full game loop | **OnFirstUpdate** |
 | Saving state on exit | **OnShutdown** |
@@ -283,7 +282,7 @@ This ensures:
 - No memory leaks from dangling patch references
 - Clean state for mod reload
 
-**Note:** Attribute-based patches auto-applied by the injector are unpatched automatically when the game closes. If you also apply manual patches in `OnGameReady()`, create your own Harmony instance there and call `UnpatchAll()` in `Unload()` with your unique ID to clean up just your manual patches.
+**Note:** All mod patches are manual. Create your Harmony instance in `OnGameReady()` and call `UnpatchAll()` in `Unload()` with your unique ID to clean up your patches.
 
 ## Common Pitfalls
 

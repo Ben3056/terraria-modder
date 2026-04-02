@@ -17,8 +17,8 @@ namespace Randomizer.Modules
 
         internal static RecipeModule Instance;
 
-        // Original recipe outputs (for reverting)
-        private Dictionary<int, int> _originalOutputs = new Dictionary<int, int>();
+        // Original recipe outputs (for reverting) — stores (type, stack) tuple
+        private Dictionary<int, (int type, int stack)> _originalOutputs = new Dictionary<int, (int type, int stack)>();
 
         public override void BuildShuffleMap()
         {
@@ -30,43 +30,57 @@ namespace Randomizer.Modules
                 var recipes = Main.recipe;
                 if (recipes == null) return;
 
-                // Collect all recipe output item types
-                var pool = new List<int>();
-                _originalOutputs.Clear();
-
-                for (int i = 0; i < numRecipes; i++)
+                // Revert to originals before re-shuffling (if previously shuffled)
+                if (_originalOutputs.Count > 0)
                 {
-                    var recipe = recipes[i];
-                    if (recipe == null) continue;
-
-                    var createItem = recipe.createItem;
-                    if (createItem == null) continue;
-
-                    int itemType = createItem.type;
-                    if (itemType > 0)
+                    foreach (var kvp in _originalOutputs)
                     {
-                        _originalOutputs[i] = itemType;
-                        if (!pool.Contains(itemType))
-                            pool.Add(itemType);
+                        var r = recipes[kvp.Key];
+                        if (r?.createItem != null)
+                        {
+                            r.createItem.SetDefaults(kvp.Value.type);
+                            r.createItem.stack = kvp.Value.stack;
+                        }
                     }
+                }
+
+                // Record original outputs only on the first call
+                if (_originalOutputs.Count == 0)
+                {
+                    for (int i = 0; i < numRecipes; i++)
+                    {
+                        var recipe = recipes[i];
+                        if (recipe?.createItem == null) continue;
+                        int itemType = recipe.createItem.type;
+                        int itemStack = recipe.createItem.stack;
+                        if (itemType > 0)
+                            _originalOutputs[i] = (itemType, itemStack);
+                    }
+                }
+
+                // Build pool from original types
+                var pool = new List<int>();
+                foreach (var kvp in _originalOutputs)
+                {
+                    if (!pool.Contains(kvp.Value.type))
+                        pool.Add(kvp.Value.type);
                 }
 
                 ShuffleMap = Seed.BuildShuffleMap(pool, Id);
 
-                // Apply shuffle to recipes
+                // Apply shuffle to recipes using original types as source
                 int changed = 0;
-                for (int i = 0; i < numRecipes; i++)
+                foreach (var kvp in _originalOutputs)
                 {
-                    var recipe = recipes[i];
-                    if (recipe == null) continue;
+                    var recipe = recipes[kvp.Key];
+                    if (recipe?.createItem == null) continue;
 
-                    var createItem = recipe.createItem;
-                    if (createItem == null) continue;
-
-                    int itemType = createItem.type;
-                    if (itemType > 0 && ShuffleMap.TryGetValue(itemType, out int newType) && newType != itemType)
+                    int origType = kvp.Value.type;
+                    if (ShuffleMap.TryGetValue(origType, out int newType) && newType != origType)
                     {
-                        createItem.SetDefaults(newType);
+                        int originalStack = recipe.createItem.stack;
+                        recipe.createItem.SetDefaults(newType);
+                        recipe.createItem.stack = originalStack;
                         changed++;
                     }
                 }
@@ -102,10 +116,10 @@ namespace Randomizer.Modules
                     if (recipe == null) continue;
                     var createItem = recipe.createItem;
                     if (createItem == null) continue;
-                    createItem.SetDefaults(kvp.Value);
+                    createItem.SetDefaults(kvp.Value.type);
+                    createItem.stack = kvp.Value.stack;
                 }
                 Recipe.UpdateRecipeList();
-                _originalOutputs.Clear();
             }
             catch (Exception ex)
             {

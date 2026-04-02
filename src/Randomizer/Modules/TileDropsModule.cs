@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Terraria;
+using TerrariaModder.Core.Assets;
 
 namespace Randomizer.Modules
 {
@@ -18,6 +19,7 @@ namespace Randomizer.Modules
         public override string Tooltip => "Breaking tiles (mining, chopping trees, etc.) drops a random item from the tile-drop pool each time. Every swing is a surprise.";
 
         internal static TileDropsModule Instance;
+        private static MethodInfo _patchedMethod;
 
         // Curated pool of items that actually drop from tiles when mined.
         // All IDs verified from _REFERENCE_SOURCE_READ_ONLY/.../ID/ItemID.cs
@@ -228,6 +230,7 @@ namespace Randomizer.Modules
                     var prefix = typeof(TileDropsModule).GetMethod(nameof(NewItem_Prefix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(targetMethod, prefix: new HarmonyMethod(prefix));
+                    _patchedMethod = targetMethod;
                     Log.Info("[Randomizer] Tile Drops: patched Item.NewItem");
                 }
                 else
@@ -248,7 +251,11 @@ namespace Randomizer.Modules
         public static void NewItem_Prefix(object source, ref int Type)
         {
             if (Instance == null || !Instance.Enabled) return;
+            if (Main.netMode != 0) return;
             if (Type <= 0) return;
+
+            // Never randomize custom asset items (type >= VanillaItemCount) — they are mod-created
+            if (ItemRegistry.TypesAssigned && Type >= ItemRegistry.VanillaItemCount) return;
 
             // Only shuffle for tile-break and tree-shake drops, not interactions/entities
             try
@@ -267,7 +274,11 @@ namespace Randomizer.Modules
 
         public override void RemovePatches(Harmony harmony)
         {
-            // Handled by harmony.UnpatchAll
+            if (_patchedMethod != null)
+            {
+                harmony.Unpatch(_patchedMethod, HarmonyPatchType.All, "com.terrariamodder.randomizer");
+                _patchedMethod = null;
+            }
         }
     }
 }

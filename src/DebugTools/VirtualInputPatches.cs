@@ -48,6 +48,10 @@ namespace DebugTools
         private static Type _keysType;             // XNA Keys enum type
         private static ConstructorInfo _keyboardStateCtor; // KeyboardState(params Keys[])
 
+        // Cached reflection for scroll wheel
+        private static FieldInfo _scrollWheelDeltaField;     // PlayerInput.ScrollWheelDelta
+        private static FieldInfo _scrollWheelDeltaForUIField; // PlayerInput.ScrollWheelDeltaForUI
+
         // Cached reflection for Main mouse fields (avoid per-frame GetField)
         private static FieldInfo _mainMouseXField;
         private static FieldInfo _mainMouseYField;
@@ -94,8 +98,25 @@ namespace DebugTools
                 BindingFlags.NonPublic | BindingFlags.Static);
 
             _harmony.Patch(updateInput, postfix: new HarmonyMethod(postfix));
-            _patchesApplied = true;
             _log?.Info("[VirtualInput] Input patch applied (postfix on PlayerInput.UpdateInput)");
+
+            // Patch Main.DoDraw with postfix for screenshot capture
+            var mainType = typeof(Terraria.Main);
+            var doDraw = mainType.GetMethod("DoDraw",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            if (doDraw != null)
+            {
+                var drawPostfix = typeof(VirtualInputPatches).GetMethod(nameof(DoDraw_Postfix),
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                _harmony.Patch(doDraw, postfix: new HarmonyMethod(drawPostfix));
+                _log?.Info("[ScreenCapture] DoDraw postfix applied");
+            }
+            else
+            {
+                _log?.Error("[ScreenCapture] Main.DoDraw not found — screenshots will not work");
+            }
+
+            _patchesApplied = true;
         }
 
         private static bool CacheReflection(Type playerInputType)
@@ -162,6 +183,10 @@ namespace DebugTools
                 _mainMouseLeftReleaseField = mainType.GetField("mouseLeftRelease", pubStatic);
                 _mainMouseRightReleaseField = mainType.GetField("mouseRightRelease", pubStatic);
 
+                // PlayerInput scroll wheel fields
+                _scrollWheelDeltaField = playerInputType.GetField("ScrollWheelDelta", pubStatic);
+                _scrollWheelDeltaForUIField = playerInputType.GetField("ScrollWheelDeltaForUI", pubStatic);
+
                 _log?.Info("[VirtualInput] Reflection cached successfully");
                 return true;
             }
@@ -196,11 +221,14 @@ namespace DebugTools
                 // Skip if no virtual input is active
                 if (!VirtualInputManager.HasActiveInput) return;
 
+                // Read mouse state ONCE (scroll delta is consumed atomically)
+                var mouseState = VirtualInputManager.GetMouseState();
+
                 // Inject trigger states
-                InjectTriggers();
+                InjectTriggers(mouseState);
 
                 // Inject mouse state
-                InjectMouse();
+                InjectMouse(mouseState);
 
                 // Inject raw keyboard state (for Main.keyState consumers)
                 InjectKeyboardState();
@@ -229,7 +257,8 @@ namespace DebugTools
             }
         }
 
-        private static void InjectTriggers()
+        private static void InjectTriggers(
+            (bool active, int x, int y, bool left, bool right, bool middle, int scroll) mouseState)
         {
             if (_triggersField == null || _currentField == null || _keyStatusField == null)
                 return;
@@ -253,16 +282,16 @@ namespace DebugTools
             }
 
             // Apply mouse button triggers from virtual mouse
-            var (active, x, y, left, right, middle, scroll) = VirtualInputManager.GetMouseState();
-            if (left && keyStatus.ContainsKey("MouseLeft"))
+            if (mouseState.left && keyStatus.ContainsKey("MouseLeft"))
                 keyStatus["MouseLeft"] = true;
-            if (right && keyStatus.ContainsKey("MouseRight"))
+            if (mouseState.right && keyStatus.ContainsKey("MouseRight"))
                 keyStatus["MouseRight"] = true;
         }
 
-        private static void InjectMouse()
+        private static void InjectMouse(
+            (bool active, int x, int y, bool left, bool right, bool middle, int scroll) mouseState)
         {
-            var (active, x, y, left, right, middle, scroll) = VirtualInputManager.GetMouseState();
+            var (active, x, y, left, right, middle, scroll) = mouseState;
 
             if (active && _mouseXField != null && _mouseYField != null)
             {
@@ -298,6 +327,28 @@ namespace DebugTools
             catch
             {
                 // Non-critical
+            }
+
+            // Inject scroll wheel delta into PlayerInput fields
+            if (scroll != 0)
+            {
+                try
+                {
+                    if (_scrollWheelDeltaField != null)
+                    {
+                        int current = (int)_scrollWheelDeltaField.GetValue(null);
+                        _scrollWheelDeltaField.SetValue(null, current + scroll);
+                    }
+                    if (_scrollWheelDeltaForUIField != null)
+                    {
+                        int current = (int)_scrollWheelDeltaForUIField.GetValue(null);
+                        _scrollWheelDeltaForUIField.SetValue(null, current + scroll);
+                    }
+                }
+                catch
+                {
+                    // Non-critical
+                }
             }
         }
 
@@ -374,12 +425,21 @@ namespace DebugTools
         }
 
         /// <summary>
+        /// Harmony postfix on Main.DoDraw — captures backbuffer for screenshots.
+        /// </summary>
+        private static void DoDraw_Postfix()
+        {
+            ScreenCapture.OnPostDraw();
+        }
+
+        /// <summary>
         /// Cleanup patches.
         /// </summary>
         public static void Cleanup()
         {
             _harmony?.UnpatchAll("com.terrariamodder.virtualinput");
             _patchesApplied = false;
+            ScreenCapture.Cleanup();
         }
     }
 }

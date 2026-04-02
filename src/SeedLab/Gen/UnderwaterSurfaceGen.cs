@@ -107,11 +107,24 @@ namespace SeedLab.Gen
             {
                 int islandCX;
                 int tries = 0;
+
+                // Guard against zero/negative ranges when exclusion zone spans most of the world
+                int leftMax = Math.Max(31, centerX - exclusionR);
+                int rightMin = Math.Min(centerX + exclusionR, worldW - 31);
+                bool hasLeftZone = leftMax > 30;
+                bool hasRightZone = rightMin < worldW - 30;
+                if (!hasLeftZone && !hasRightZone) continue; // no valid placement zone
+
                 do
                 {
-                    islandCX = rng.Next(2) == 0
-                        ? rng.Next(30, Math.Max(31, centerX - exclusionR))
-                        : rng.Next(Math.Min(centerX + exclusionR, worldW - 31), worldW - 30);
+                    if (!hasLeftZone)
+                        islandCX = rng.Next(rightMin, worldW - 30);
+                    else if (!hasRightZone)
+                        islandCX = rng.Next(30, leftMax);
+                    else
+                        islandCX = rng.Next(2) == 0
+                            ? rng.Next(30, leftMax)
+                            : rng.Next(rightMin, worldW - 30);
                     tries++;
                 }
                 while (tries < 25 && (islandCX < 30 || islandCX > worldW - 30));

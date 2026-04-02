@@ -184,8 +184,7 @@ public class Mod : IMod
 
     public void Initialize(ModContext context)
     {
-        // Attribute-based patches are auto-applied by injector
-        // Manual patches go in OnGameReady() if needed
+        // Patches are applied manually in OnGameReady()
     }
 
     private static bool IsCosmeticPet(Projectile proj)

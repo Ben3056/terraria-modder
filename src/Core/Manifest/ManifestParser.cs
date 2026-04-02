@@ -102,8 +102,16 @@ namespace TerrariaModder.Core.Manifest
             manifest.LoadAfter = ExtractStringArray(json, "load_after");
             manifest.LoadBefore = ExtractStringArray(json, "load_before");
             manifest.Tags = ExtractStringArray(json, "tags");
-            manifest.ConfigSchemaJson = ExtractObject(json, "config_schema");
             manifest.Keybinds = ExtractKeybinds(json);
+
+            string mp = ExtractString(json, "multiplayer");
+            if (mp != null)
+            {
+                manifest.MultiplayerExplicit = true;
+                manifest.Multiplayer = mp == "required" ? MultiplayerCategory.Required
+                    : mp == "client-only" ? MultiplayerCategory.ClientOnly
+                    : MultiplayerCategory.Optional;
+            }
 
             // Determine DLL path
             string dllName = manifest.EntryDll;
@@ -164,8 +172,8 @@ namespace TerrariaModder.Core.Manifest
             {
                 if (string.IsNullOrWhiteSpace(keybind.Name))
                     errors.Add($"[{fileName}] Keybind '{keybind.Id}' is missing 'label' field");
-                if (string.IsNullOrWhiteSpace(keybind.DefaultKey))
-                    errors.Add($"[{fileName}] Keybind '{keybind.Id}' is missing 'default' field");
+                if (keybind.DefaultKey == null)
+                    errors.Add($"[{fileName}] Keybind '{keybind.Id}' is missing 'default' field (use \"\" for unbound)");
             }
 
             manifest.ValidationErrors.AddRange(errors);

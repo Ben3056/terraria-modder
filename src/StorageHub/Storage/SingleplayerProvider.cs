@@ -147,7 +147,7 @@ namespace StorageHub.Storage
             return items;
         }
 
-        public bool TakeItem(int sourceChestIndex, int sourceSlot, int count, out ItemSnapshot taken)
+        public virtual bool TakeItem(int sourceChestIndex, int sourceSlot, int count, out ItemSnapshot taken)
         {
             taken = default;
 
@@ -255,7 +255,7 @@ namespace StorageHub.Storage
             }
         }
 
-        public int DepositItem(ItemSnapshot item, out int depositedToChest)
+        public virtual int DepositItem(ItemSnapshot item, out int depositedToChest)
         {
             depositedToChest = -1;
 
@@ -301,6 +301,7 @@ namespace StorageHub.Storage
 
                             chestItem.stack = stack + toAdd;
                             depositedToChest = chestIndex;
+                            OnChestModified(chestIndex);
                             remaining -= toAdd;
                             _log.Debug($"Stacked {toAdd}x {item.Name} into chest {chestIndex} slot {i}, {remaining} remaining");
 
@@ -349,6 +350,7 @@ namespace StorageHub.Storage
                             ApplyPrefix(chestItem, item.Prefix);
 
                             depositedToChest = chestIndex;
+                            OnChestModified(chestIndex);
                             remaining -= toDeposit;
                             _log.Debug($"Deposited {toDeposit}x {item.Name} into chest {chestIndex} slot {i}, {remaining} remaining");
 
@@ -378,7 +380,7 @@ namespace StorageHub.Storage
             }
         }
 
-        public bool MoveToInventory(int sourceChestIndex, int sourceSlot, int count)
+        public virtual bool MoveToInventory(int sourceChestIndex, int sourceSlot, int count)
         {
             try
             {
@@ -826,6 +828,12 @@ namespace StorageHub.Storage
                 _log.Error($"Error adding bank items: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// Called whenever a chest slot is modified by DepositItem.
+        /// Override in MultiplayerProvider to track which chests need packet 32 broadcasts.
+        /// </summary>
+        protected virtual void OnChestModified(int chestIndex) { }
 
         private void AddChestItems(Chest chest, int chestIndex, List<ItemSnapshot> items)
         {

@@ -51,7 +51,7 @@ TerrariaModder lets you run mods on Terraria 1.4.5 without waiting for tModLoade
 | AutoBuffs | Automatically applies nearby furniture buffs |
 | PetChests | Right-click cosmetic pets to access piggy bank |
 | ItemSpawner | In-game item spawner with search (singleplayer) |
-| StorageHub | Unified storage with crafting, shimmer decraft, painting chest, relay network |
+| StorageHub | Unified storage with crafting, shimmer decraft, mysterious chest, relay network |
 | AdminPanel | God mode, speed boost, teleport, time control, respawn settings |
 | WhipStacking | Restores pre-1.4.5 whip tag stacking behavior |
 | SeedLab | Mix and match secret seed features for world generation |

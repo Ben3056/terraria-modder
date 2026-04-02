@@ -8,7 +8,7 @@ using TerrariaModder.Core.Logging;
 
 namespace SkipIntro
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle
     {
         public string Id => "skip-intro";
         public string Name => "Skip Intro";
@@ -30,9 +30,16 @@ namespace SkipIntro
             _log = context.Logger;
             _staticLog = _log;
 
-            if (!context.Config.Get<bool>("enabled"))
+            var config = context.GetConfig<SkipIntroConfig>();
+            if (config != null && !config.Enabled)
             {
                 _log.Info("Skip Intro is disabled in config");
+                return;
+            }
+
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _log.Info("SkipIntro: dedicated server — skipping");
                 return;
             }
 
@@ -112,6 +119,8 @@ namespace SkipIntro
                 _hasSkipped = true;
             }
         }
+
+        public void OnContentReady(ModContext context) { }
 
         public void OnWorldLoad() { }
         public void OnWorldUnload() { }

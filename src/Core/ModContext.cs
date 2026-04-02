@@ -21,14 +21,20 @@ namespace TerrariaModder.Core
         public ILogger Logger { get; }
 
         /// <summary>
-        /// Mod configuration (null if mod has no config_schema).
+        /// Mod configuration (null if mod has no ModConfig subclass).
         /// </summary>
-        public IModConfig Config { get; }
+        public ModConfig Config { get; }
 
         /// <summary>
         /// Path to the mod's folder.
         /// </summary>
         public string ModFolder { get; }
+
+        /// <summary>
+        /// True if this process is a dedicated server (TerrariaServer.exe).
+        /// Mods can use this to skip UI initialization blocks.
+        /// </summary>
+        public bool IsServer => System.Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1";
 
         /// <summary>
         /// The parsed manifest for this mod.
@@ -37,7 +43,12 @@ namespace TerrariaModder.Core
 
         private readonly List<Keybind> _registeredKeybinds = new List<Keybind>();
 
-        public ModContext(ILogger logger, string modFolder, ModManifest manifest, IModConfig config = null)
+        /// <summary>
+        /// Get the typed config instance for this mod. Returns null if no config or wrong type.
+        /// </summary>
+        public T GetConfig<T>() where T : ModConfig => Config as T;
+
+        public ModContext(ILogger logger, string modFolder, ModManifest manifest, ModConfig config = null)
         {
             Logger = logger;
             ModFolder = modFolder;
@@ -124,6 +135,20 @@ namespace TerrariaModder.Core
 
         #endregion
 
+        #region Tooltip Modifiers
+
+        /// <summary>
+        /// Register a global tooltip modifier — applied to every custom item's tooltip.
+        /// Callback: (int itemType, List&lt;string&gt; lines) — modify lines in place.
+        /// Client-only; has no effect when called on a dedicated server.
+        /// </summary>
+        public void RegisterTooltipModifier(Action<int, List<string>> modifier)
+        {
+            AssetSystem.RegisterTooltipModifier(modifier);
+        }
+
+        #endregion
+
         #region NPC Shops
 
         /// <summary>
@@ -144,6 +169,94 @@ namespace TerrariaModder.Core
         public void RegisterDrop(DropDefinition drop)
         {
             AssetSystem.RegisterDrop(drop);
+        }
+
+        /// <summary>
+        /// Register a shimmer transform: InputId item shimmers into OutputId item.
+        /// Both IDs accept "modid:itemname" (custom) or vanilla item name/type.
+        /// Server-safe — shimmer transforms run server-side in multiplayer.
+        /// Call from Initialize() or OnContentReady().
+        /// </summary>
+        public void RegisterShimmer(ShimmerDefinition shimmer)
+        {
+            AssetSystem.RegisterShimmer(shimmer);
+        }
+
+        // ── Cross-mod query API (valid from OnContentReady onward) ──
+
+        /// <summary>
+        /// Returns the runtime type ID for a custom item registered by any mod.
+        /// Only valid from OnContentReady() or later — returns -1 with a WARN if called during Initialize().
+        /// </summary>
+        /// <param name="modId">The mod that registered the item.</param>
+        /// <param name="itemName">The item name (without mod prefix).</param>
+        public int GetItemType(string modId, string itemName)
+        {
+            if (!ItemRegistry.TypesAssigned)
+            {
+                Logger.Warn($"[{Manifest.Id}] GetItemType called before types assigned — call from OnContentReady(), not Initialize()");
+                return -1;
+            }
+            return ItemRegistry.GetRuntimeType($"{modId}:{itemName}");
+        }
+
+        /// <summary>
+        /// Returns true and sets type if the item exists and type IDs are assigned.
+        /// Only valid from OnContentReady() or later.
+        /// </summary>
+        public bool TryGetItemType(string modId, string itemName, out int type)
+        {
+            type = GetItemType(modId, itemName);
+            return type >= 0;
+        }
+
+        /// <summary>
+        /// Returns true if the mod with the given ID is currently loaded.
+        /// </summary>
+        public bool IsModLoaded(string modId)
+        {
+            return PluginLoader.IsModLoaded(modId);
+        }
+
+        /// <summary>
+        /// Returns all item names registered by the given mod.
+        /// Only valid from OnContentReady() or later — returns empty if called during Initialize().
+        /// </summary>
+        public IEnumerable<string> GetModItemNames(string modId)
+        {
+            if (!ItemRegistry.TypesAssigned)
+            {
+                Logger.Warn($"[{Manifest.Id}] GetModItemNames called before types assigned — call from OnContentReady(), not Initialize()");
+                return System.Array.Empty<string>();
+            }
+            return ItemRegistry.GetItemsForMod(modId);
+        }
+
+        #endregion
+
+        #region Mod State Provider
+
+        /// <summary>
+        /// Register a state provider for this mod, exposing runtime state via
+        /// GET /api/mods/{mod-id}/state on the debug HTTP server.
+        /// </summary>
+        public void RegisterStateProvider(IModStateProvider provider)
+        {
+            ModStateRegistry.Register(Manifest.Id, provider);
+        }
+
+        #endregion
+
+        #region Mod Action Provider
+
+        /// <summary>
+        /// Register an action provider for this mod, exposing executable actions via
+        /// POST /api/mod-action on the debug HTTP server. Use query("capabilities")
+        /// to discover all available actions.
+        /// </summary>
+        public void RegisterActionProvider(IModActionProvider provider)
+        {
+            ModActionRegistry.Register(Manifest.Id, provider);
         }
 
         #endregion

@@ -5,6 +5,7 @@ using Terraria;
 using Terraria.DataStructures;
 using Terraria.ID;
 using TerrariaModder.Core;
+using TerrariaModder.Core.Debug;
 using TerrariaModder.Core.Events;
 using TerrariaModder.Core.Input;
 using TerrariaModder.Core.Logging;
@@ -13,7 +14,7 @@ using TerrariaModder.Core.UI.Widgets;
 
 namespace ItemSpawner
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle, IModStateProvider, IModActionProvider
     {
         public string Id => "item-spawner";
         public string Name => "Item Spawner";
@@ -22,7 +23,7 @@ namespace ItemSpawner
         private ILogger _log;
         private ModContext _context;
         private bool _enabled;
-        private bool _singleplayerOnly;
+        private ItemSpawnerConfig _config;
 
         private List<ItemEntry> _allItems = new List<ItemEntry>();
         private List<ItemEntry> _filteredItems = new List<ItemEntry>();
@@ -37,10 +38,30 @@ namespace ItemSpawner
         private TextInput _searchInput = new TextInput("Type to search...", 200);
         private ScrollView _scroll = new ScrollView();
 
+        // Pending spawn queue: server validates, client executes locally on "ok".
+        // FIFO assumption: the server responds to spawn requests in the same order they
+        // were sent. The response payload is just "ok"/"denied" with no item type, so we
+        // cannot match responses to specific requests. If the server ever reorders responses,
+        // the wrong pending item would be dequeued. This is acceptable because:
+        //   1. ServerCommandRequest/Response is ordered per-client in Terraria's net layer.
+        //   2. The queue is cleared on world unload (OnWorldUnload) to prevent stale entries.
+        // Each entry: (itemId, stack, toCursor)
+        private readonly Queue<(int itemId, int stack, bool toCursor)> _pendingSpawns
+            = new Queue<(int, int, bool)>();
+
         public void Initialize(ModContext context)
         {
             _log = context.Logger;
             _context = context;
+            _config = context.GetConfig<ItemSpawnerConfig>();
+
+            // Item spawner is client-only UI — no UI on dedicated server
+            // Use env var instead of Main.dedServ — direct Main access throws TypeInitializationException on TerrariaServer.exe
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _log.Info("ItemSpawner: skipping UI init (dedicated server)");
+                return;
+            }
 
             LoadConfig();
 
@@ -57,14 +78,55 @@ namespace ItemSpawner
 
             context.RegisterKeybind("toggle", "Toggle Spawner", "Open/close spawner UI", "Insert", OnToggleUI);
             FrameEvents.OnPreUpdate += OnUpdate;
+            TerrariaModder.Core.Net.NetSync.OnServerCommandResponse += OnServerCommandResponse;
 
+            context.RegisterStateProvider(this);
+            context.RegisterActionProvider(this);
             _log.Info("ItemSpawner initialized - Press Insert to open");
+        }
+
+        public Dictionary<string, object> GetModState()
+        {
+            return new Dictionary<string, object>
+            {
+                { "enabled", _enabled },
+                { "panelOpen", _panel.IsOpen },
+                { "searchText", _searchInput.Text ?? "" },
+                { "totalItems", _allItems.Count },
+                { "filteredItems", _filteredItems.Count }
+            };
+        }
+
+        public List<ModActionInfo> GetActions()
+        {
+            return new List<ModActionInfo>
+            {
+                new ModActionInfo("open_panel", "Open the Item Spawner panel"),
+                new ModActionInfo("close_panel", "Close the Item Spawner panel"),
+            };
+        }
+
+        public ModActionResult ExecuteAction(string name, Dictionary<string, string> args)
+        {
+            switch (name)
+            {
+                case "open_panel":
+                    if (!_panel.IsOpen) OnToggleUI();
+                    EventLog.Emit("item-spawner", "open_panel", "{\"open\":true}");
+                    return ModActionResult.Ok("Panel opened");
+                case "close_panel":
+                    if (_panel.IsOpen) _panel.Close();
+                    EventLog.Emit("item-spawner", "close_panel", "{\"open\":false}");
+                    return ModActionResult.Ok("Panel closed");
+                default:
+                    return null;
+            }
         }
 
         private void LoadConfig()
         {
-            _enabled = _context.Config.Get<bool>("enabled");
-            _singleplayerOnly = _context.Config.Get<bool>("singleplayerOnly");
+            if (_config == null) return;
+            _enabled = _config.Enabled;
         }
 
         private void BuildItemCatalog()
@@ -111,15 +173,6 @@ namespace ItemSpawner
         {
             if (!_panel.IsOpen)
             {
-                if (_singleplayerOnly)
-                {
-                    if (Main.netMode != 0)
-                    {
-                        _log.Warn("ItemSpawner is disabled in multiplayer");
-                        return;
-                    }
-                }
-
                 _searchInput.Clear();
                 _scroll.ResetScroll();
                 if (_allItems.Count == 0) BuildItemCatalog();
@@ -131,6 +184,13 @@ namespace ItemSpawner
             {
                 _panel.Close();
             }
+        }
+
+        private bool HasSpawnPermission()
+        {
+            if (Main.netMode == 0) return true;
+            return TerrariaModder.Core.Net.NetSync.LocalPlayerIsAdmin
+                || TerrariaModder.Core.Net.NetSync.LocalPlayerHasModAccess("item-spawner");
         }
 
         private void OnPanelClose()
@@ -150,9 +210,10 @@ namespace ItemSpawner
             {
                 _filteredItems.Clear();
                 string lower = search.ToLower();
+                bool isIdSearch = int.TryParse(search, out int searchId);
                 foreach (var item in _allItems)
                 {
-                    if (item.Name.ToLower().Contains(lower))
+                    if ((isIdSearch && item.Id == searchId) || item.Name.ToLower().Contains(lower))
                         _filteredItems.Add(item);
                 }
             }
@@ -181,8 +242,16 @@ namespace ItemSpawner
                 // Help text
                 int helpY = s.Advance(34);
                 UIRenderer.DrawRect(s.X, helpY, s.Width, 30, UIColors.SectionBg);
-                UIRenderer.DrawTextSmall("L-Click: +1 to cursor    R-Click: Full stack to cursor", s.X + 4, helpY + 2, UIColors.Success);
-                UIRenderer.DrawTextSmall("Shift+L: +1 to inventory  Shift+R: Full stack to inventory", s.X + 4, helpY + 16, UIColors.Info);
+                if (Main.netMode != 0 && !HasSpawnPermission())
+                {
+                    UIRenderer.DrawTextSmall("[Admin] Spawn requires Admin or ItemSpawner grant", s.X + 4, helpY + 2, UIColors.Warning);
+                    UIRenderer.DrawTextSmall("Contact the server admin to get access", s.X + 4, helpY + 16, UIColors.TextDim);
+                }
+                else
+                {
+                    UIRenderer.DrawTextSmall("L-Click: +1 to cursor    R-Click: Full stack to cursor", s.X + 4, helpY + 2, UIColors.Success);
+                    UIRenderer.DrawTextSmall("Shift+L: +1 to inventory  Shift+R: Full stack to inventory", s.X + 4, helpY + 16, UIColors.Info);
+                }
 
                 // Item grid
                 int gridX = s.X;
@@ -236,23 +305,30 @@ namespace ItemSpawner
                     if (isHover)
                     {
                         ItemTooltip.Set(item.Id);
+                        bool canSpawn = HasSpawnPermission();
 
                         if (WidgetInput.MouseLeftClick)
                         {
                             _searchInput.Unfocus();
-                            if (shiftHeld)
-                                SpawnToInventory(item.Id, 1);
-                            else
-                                SpawnToCursor(item.Id, 1);
+                            if (canSpawn)
+                            {
+                                if (shiftHeld)
+                                    SpawnToInventory(item.Id, 1);
+                                else
+                                    SpawnToCursor(item.Id, 1);
+                            }
                             WidgetInput.ConsumeClick();
                         }
                         else if (WidgetInput.MouseRightClick)
                         {
                             _searchInput.Unfocus();
-                            if (shiftHeld)
-                                SpawnToInventory(item.Id, item.MaxStack);
-                            else
-                                SpawnToCursor(item.Id, item.MaxStack);
+                            if (canSpawn)
+                            {
+                                if (shiftHeld)
+                                    SpawnToInventory(item.Id, item.MaxStack);
+                                else
+                                    SpawnToCursor(item.Id, item.MaxStack);
+                            }
                             WidgetInput.ConsumeRightClick();
                         }
                     }
@@ -281,6 +357,12 @@ namespace ItemSpawner
 
         private void SpawnToCursor(int itemId, int stack)
         {
+            if (Main.netMode != 0)
+            {
+                SpawnViaServer(itemId, stack, toCursor: true);
+                return;
+            }
+
             try
             {
                 Item mouseItem = Main.mouseItem;
@@ -319,6 +401,12 @@ namespace ItemSpawner
 
         private void SpawnToInventory(int itemId, int stack)
         {
+            if (Main.netMode != 0)
+            {
+                SpawnViaServer(itemId, stack, toCursor: false);
+                return;
+            }
+
             try
             {
                 Player player = Main.player[Main.myPlayer];
@@ -331,7 +419,81 @@ namespace ItemSpawner
             }
         }
 
+        private void SpawnViaServer(int itemId, int stack, bool toCursor)
+        {
+            _log.Info($"[ItemSpawner] SpawnViaServer: item={itemId} stack={stack} toCursor={toCursor} netMode={Main.netMode} H&P={Netplay.IsHostAndPlay}");
+            if (!HasSpawnPermission())
+            {
+                _log.Info("[ItemSpawner] SpawnViaServer: permission denied");
+                try { Main.NewText("[ItemSpawner] Requires Admin or ItemSpawner grant.", 255, 80, 80); } catch { }
+                return;
+            }
+
+            // Enqueue pending spawn — executed locally when server responds "ok"
+            _pendingSpawns.Enqueue((itemId, stack, toCursor));
+            _log.Info($"[ItemSpawner] SpawnViaServer: enqueued, sending ServerCommandRequest");
+            // Payload only needs auth info; actual item add is client-side
+            TerrariaModder.Core.Net.NetSync.SendServerCommandRequest("spawn", $"{itemId}:{stack}:0");
+        }
+
+        private void OnServerCommandResponse(string type, string result)
+        {
+            if (type != "spawn") return;
+            if (_pendingSpawns.Count == 0) return;
+
+            var (itemId, stack, toCursor) = _pendingSpawns.Dequeue();
+
+            if (result != "ok" && result != "OK")
+            {
+                try { Main.NewText($"[ItemSpawner] Spawn denied: {result}", 255, 80, 80); } catch { }
+                return;
+            }
+
+            try
+            {
+                if (toCursor)
+                    AddToCursor(itemId, stack);
+                else
+                    AddToInventory(itemId, stack);
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"[ItemSpawner] OnServerCommandResponse local add failed: {ex.Message}");
+            }
+        }
+
+        private void AddToCursor(int itemId, int stack)
+        {
+            Item mouseItem = Main.mouseItem;
+            if (mouseItem == null || mouseItem.type == 0)
+            {
+                var newItem = new Item();
+                newItem.SetDefaults(itemId);
+                newItem.stack = stack;
+                Main.mouseItem = newItem;
+            }
+            else if (mouseItem.type == itemId)
+            {
+                int canAdd = mouseItem.maxStack - mouseItem.stack;
+                if (canAdd > 0) mouseItem.stack += Math.Min(stack, canAdd);
+                else AddToInventory(itemId, stack);
+            }
+            else
+            {
+                AddToInventory(itemId, stack);
+            }
+        }
+
+        private void AddToInventory(int itemId, int stack)
+        {
+            Player player = Main.player[Main.myPlayer];
+            var source = new EntitySource_Parent(player);
+            player.QuickSpawnItem(source, itemId, stack);
+        }
+
         #endregion
+
+        public void OnContentReady(ModContext context) { }
 
         public void OnWorldLoad()
         {
@@ -342,11 +504,13 @@ namespace ItemSpawner
         public void OnWorldUnload()
         {
             _panel.Close();
+            _pendingSpawns?.Clear();
         }
 
         public void Unload()
         {
             FrameEvents.OnPreUpdate -= OnUpdate;
+            TerrariaModder.Core.Net.NetSync.OnServerCommandResponse -= OnServerCommandResponse;
             _panel.UnregisterDrawCallback();
             _searchInput.Unfocus();
 

@@ -73,6 +73,11 @@ namespace TerrariaModder.Core.Config
         public string LogsPath { get; private set; }
 
         /// <summary>
+        /// Absolute path to the centralized mod configs folder (e.g., Terraria/TerrariaModder/core/configs/).
+        /// </summary>
+        public string ConfigsPath { get; private set; }
+
+        /// <summary>
         /// Get the singleton instance. Loads config on first access.
         /// </summary>
         public static CoreConfig Instance
@@ -152,6 +157,9 @@ namespace TerrariaModder.Core.Config
             config.LogsPath = string.IsNullOrEmpty(config.LogsFolder)
                 ? config.CorePath
                 : Path.Combine(config.RootPath, config.LogsFolder);
+
+            // Centralized mod configs: always at {core}/configs/
+            config.ConfigsPath = Path.Combine(config.CorePath, "configs");
 
             return config;
         }

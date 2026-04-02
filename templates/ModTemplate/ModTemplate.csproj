@@ -18,7 +18,7 @@
 
   <ItemGroup>
     <Reference Include="0Harmony">
-      <HintPath>..\..\Terraria\Mods\Libs\0Harmony.dll</HintPath>
+      <HintPath>..\..\Terraria\TerrariaModder\core\deps\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

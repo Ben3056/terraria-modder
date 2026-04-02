@@ -35,7 +35,12 @@ namespace TerrariaModder.Core.Assets
         /// <param name="logger">Logger instance.</param>
         /// <param name="newCount">New maximum item count (default 32767 = max positive short).</param>
         /// <returns>The original vanilla item count, or -1 on failure.</returns>
-        public static int Apply(ILogger logger, int newCount = 32767)
+        /// <summary>
+        /// Extend the type system using a content type descriptor.
+        /// The descriptor specifies which Sets class to scan, the vanilla count, the
+        /// extended count, and any additional named fields to resize explicitly.
+        /// </summary>
+        internal static int Apply(ILogger logger, ContentTypeDescriptor descriptor)
         {
             _log = logger;
             if (_applied)
@@ -46,57 +51,87 @@ namespace TerrariaModder.Core.Assets
 
             try
             {
-                _log?.Info("[TypeExtension] Extending item type system...");
+                _log?.Info("[TypeExtension] Extending type system...");
 
-                // Step 1: Read and save original ItemID.Count
-                var itemIdType = typeof(Terraria.ID.ItemID);
-                var countField = itemIdType.GetField("Count", BindingFlags.Public | BindingFlags.Static);
-                if (countField == null)
+                OriginalCount = descriptor.VanillaCount;
+                ExtendedCount = descriptor.ExtendedCount;
+                _log?.Info($"[TypeExtension] VanillaCount = {OriginalCount}, extending to {ExtendedCount}");
+
+                // Step 1: Resize IdClass.Sets arrays (ItemID.Sets, TileID.Sets, etc.)
+                int setsResized = ResizeSetsClass(descriptor.IdClass, OriginalCount, ExtendedCount);
+
+                // Step 2: Resize additional named fields listed in the descriptor
+                // (TextureAssets.Item, Lang._itemNameCache, Main.itemAnimations, Item.staff, etc.)
+                int namedResized = ResizeNamedFields(descriptor.AdditionalFields, OriginalCount, ExtendedCount);
+
+                // Step 3: Comprehensive scan — catch any static array in the Terraria assembly
+                // matching the vanilla count that wasn't covered by steps 1–2.
+                // ArmorSetBonuses, QuickStacking, and similar arrays are caught here.
+                // Safety: the vanilla count (6145 for items) is specific enough that any array
+                // of that exact size is almost certainly indexed by that content type.
+                int assemblyResized = ResizeAllAssemblyArrays(OriginalCount, ExtendedCount);
+
+                // DO NOT change IdClass.Count — PostSetupContent() iterates 0..Count-1
+                // and runs AFTER OnGameReady, accessing ContentSamples that won't have
+                // custom type entries yet. Instance arrays (QuickStacking, ItemSorting) are
+                // handled by safety finalizers in DrawPatches instead.
+
+                // Step 4: On dedicated server, also scan TerrariaServer.exe assembly.
+                // TerrariaServer has its OWN copies of ItemID.Sets, Item.cachedItemSpawnsByType, etc.
+                // Without extending those, Item.NewItem(customType) crashes with IndexOutOfRangeException.
+                if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
                 {
-                    _log?.Error("[TypeExtension] ItemID.Count field not found");
-                    return -1;
+                    int serverResized = 0;
+                    foreach (var asm2 in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        if (asm2 == typeof(Terraria.Main).Assembly) continue; // Skip the one we already scanned
+                        string asmName = asm2.GetName().Name;
+                        if (asmName != "TerrariaServer" && asmName != "Terraria") continue;
+
+                        try
+                        {
+                            // Scan the server assembly's ItemID.Sets
+                            var serverIdClass = asm2.GetType(descriptor.IdClass?.FullName ?? "Terraria.ID.ItemID");
+                            if (serverIdClass != null)
+                                serverResized += ResizeSetsClass(serverIdClass, OriginalCount, ExtendedCount);
+
+                            // Comprehensive array scan on server assembly
+                            foreach (var type in asm2.GetTypes())
+                            {
+                                try
+                                {
+                                    var fields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                                    foreach (var field in fields)
+                                    {
+                                        if (!field.FieldType.IsArray) continue;
+                                        try
+                                        {
+                                            var arr = field.GetValue(null) as Array;
+                                            if (arr == null || arr.Length != OriginalCount) continue;
+                                            var elemType = field.FieldType.GetElementType();
+                                            var newArr = Array.CreateInstance(elemType, ExtendedCount);
+                                            Array.Copy(arr, newArr, Math.Min(arr.Length, ExtendedCount));
+                                            FillNewEntries(newArr, arr, OriginalCount, ExtendedCount, elemType);
+                                            field.SetValue(null, newArr);
+                                            serverResized++;
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _log?.Warn($"[TypeExtension] Server assembly scan error: {ex.Message}");
+                        }
+                    }
+                    if (serverResized > 0)
+                        _log?.Info($"[TypeExtension] Server assembly: resized {serverResized} arrays");
                 }
-
-                var countVal = countField.GetValue(null);
-                if (countVal is short s) OriginalCount = s;
-                else if (countVal is int i) OriginalCount = i;
-                else
-                {
-                    _log?.Error($"[TypeExtension] ItemID.Count has unexpected type: {countVal?.GetType()}");
-                    return -1;
-                }
-                ExtendedCount = newCount;
-                _log?.Info($"[TypeExtension] Original ItemID.Count = {OriginalCount}, extending to {newCount}");
-
-                // Step 2: Resize ItemID.Sets arrays
-                int setsResized = ResizeItemIdSets(itemIdType, OriginalCount, newCount);
-
-                // Step 3: Resize TextureAssets arrays
-                int textureResized = ResizeTextureAssets(OriginalCount, newCount);
-
-                // Step 4: Resize Lang caches
-                int langResized = ResizeLangCaches(OriginalCount, newCount);
-
-                // Step 5: Resize Main arrays
-                int mainResized = ResizeMainArrays(OriginalCount, newCount);
-
-                // Step 6: Resize Item static arrays (staff, claw)
-                int itemResized = ResizeItemArrays(OriginalCount, newCount);
-
-                // Step 7: Comprehensive scan — catch any static array in the Terraria assembly
-                // that matches ItemID.Count size but wasn't covered by specific resize methods.
-                // This catches ArmorSetBonuses, QuickStacking, and any other missed arrays.
-                int assemblyResized = ResizeAllAssemblyArrays(OriginalCount, newCount);
-
-                // DO NOT change ItemID.Count — PostSetupContent() iterates 0..Count-1
-                // and runs AFTER OnGameReady (during DrawSplash→Initialize_AlmostEverything).
-                // It accesses ContentSamples.ItemsByType which won't have entries for custom types yet.
-                // Instance arrays sized with new int[ItemID.Count] (QuickStacking, ItemSorting, etc.)
-                // are handled by safety finalizers in DrawPatches instead.
-                // countField.SetValue(null, (short)newCount);
 
                 _applied = true;
-                _log?.Info($"[TypeExtension] Complete: {setsResized} Sets + {textureResized} texture + {langResized} lang + {mainResized} main + {itemResized} item + {assemblyResized} assembly-wide arrays resized");
+                _log?.Info($"[TypeExtension] Complete: {setsResized} Sets + {namedResized} named + {assemblyResized} assembly-wide arrays resized");
 
                 return OriginalCount;
             }
@@ -107,15 +142,19 @@ namespace TerrariaModder.Core.Assets
             }
         }
 
-        private static int ResizeItemIdSets(Type itemIdType, int oldSize, int newSize)
+        /// <summary>
+        /// Resize all static array fields inside idClass.Sets (e.g. ItemID.Sets, TileID.Sets).
+        /// Also updates SetFactory._size and clears its buffer caches.
+        /// </summary>
+        private static int ResizeSetsClass(Type idClass, int oldSize, int newSize)
         {
             int count = 0;
             try
             {
-                var setsType = itemIdType.GetNestedType("Sets", BindingFlags.Public);
+                var setsType = idClass?.GetNestedType("Sets", BindingFlags.Public);
                 if (setsType == null)
                 {
-                    _log?.Warn("[TypeExtension] ItemID.Sets not found");
+                    _log?.Warn($"[TypeExtension] {idClass?.Name}.Sets not found");
                     return 0;
                 }
 
@@ -129,15 +168,11 @@ namespace TerrariaModder.Core.Assets
                         var sizeField = factory.GetType().GetField("_size", BindingFlags.NonPublic | BindingFlags.Instance);
                         sizeField?.SetValue(factory, newSize);
 
-                        // Clear buffer caches so new arrays use correct size
                         foreach (var cacheName in new[] { "_boolBufferCache", "_intBufferCache", "_ushortBufferCache", "_floatBufferCache" })
                         {
                             var cacheField = factory.GetType().GetField(cacheName, BindingFlags.NonPublic | BindingFlags.Instance);
                             if (cacheField != null)
-                            {
-                                var cache = cacheField.GetValue(factory);
-                                cache?.GetType().GetMethod("Clear")?.Invoke(cache, null);
-                            }
+                                cacheField.GetValue(factory)?.GetType().GetMethod("Clear")?.Invoke(cacheField.GetValue(factory), null);
                         }
                         _log?.Debug("[TypeExtension] Updated SetFactory._size and cleared caches");
                     }
@@ -147,25 +182,16 @@ namespace TerrariaModder.Core.Assets
                 var fields = setsType.GetFields(BindingFlags.Public | BindingFlags.Static);
                 foreach (var field in fields)
                 {
-                    if (field.Name == "Factory") continue;
-                    if (!field.FieldType.IsArray) continue;
-
+                    if (field.Name == "Factory" || !field.FieldType.IsArray) continue;
                     try
                     {
                         var arr = field.GetValue(null) as Array;
-                        if (arr == null) continue;
-
-                        // Only resize arrays that match the old item count
-                        if (arr.Length != oldSize) continue;
+                        if (arr == null || arr.Length != oldSize) continue;
 
                         var elemType = field.FieldType.GetElementType();
                         var newArr = Array.CreateInstance(elemType, newSize);
                         Array.Copy(arr, newArr, Math.Min(arr.Length, newSize));
-
-                        // Fill new entries with the correct default value
-                        // Many int Sets use -1 as "not set", detect and fill accordingly
                         FillNewEntries(newArr, arr, oldSize, newSize, elemType);
-
                         field.SetValue(null, newArr);
                         count++;
                     }
@@ -175,7 +201,7 @@ namespace TerrariaModder.Core.Assets
                     }
                 }
 
-                _log?.Debug($"[TypeExtension] Resized {count} ItemID.Sets arrays");
+                _log?.Debug($"[TypeExtension] Resized {count} {idClass?.Name}.Sets arrays");
             }
             catch (Exception ex)
             {
@@ -185,9 +211,47 @@ namespace TerrariaModder.Core.Assets
         }
 
         /// <summary>
+        /// Resize named static array fields listed in the descriptor's AdditionalFields.
+        /// Used for fields like TextureAssets.Item, Lang._itemNameCache, Main.itemAnimations.
+        /// Each field is found by declaring type + field name; missing fields are silently skipped.
+        /// </summary>
+        private static int ResizeNamedFields(ContentTypeDescriptor.NamedField[] fields, int oldSize, int newSize)
+        {
+            if (fields == null) return 0;
+            int count = 0;
+            foreach (var nf in fields)
+            {
+                try
+                {
+                    if (nf.DeclaringType == null) continue;
+                    var field = nf.DeclaringType.GetField(nf.FieldName,
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    if (field == null || !field.FieldType.IsArray) continue;
+
+                    var arr = field.GetValue(null) as Array;
+                    if (arr == null || arr.Length != oldSize) continue;
+
+                    var elemType = field.FieldType.GetElementType();
+                    var newArr = Array.CreateInstance(elemType, newSize);
+                    Array.Copy(arr, newArr, arr.Length);
+                    FillNewEntries(newArr, arr, oldSize, newSize, elemType);
+                    field.SetValue(null, newArr);
+                    count++;
+                    _log?.Debug($"[TypeExtension] Resized {nf.DeclaringType.Name}.{nf.FieldName}: {oldSize} → {newSize}");
+                }
+                catch (Exception ex)
+                {
+                    _log?.Debug($"[TypeExtension] Failed to resize {nf.DeclaringType?.Name}.{nf.FieldName}: {ex.Message}");
+                }
+            }
+            return count;
+        }
+
+        /// <summary>
         /// Fill newly-extended array entries with the appropriate default value.
-        /// Detects the default by checking what value most entries in the original array had.
-        /// Critical for int arrays from CreateIntSet(-1) which need -1, not 0.
+        /// Uses index 0 (the empty/air item slot) as the sentinel: vanilla never gives
+        /// the air item special properties, so arr[0] IS the semantic default for any
+        /// given array — whether that's -1, 0, 0f, or false.
         /// </summary>
         private static void FillNewEntries(Array newArr, Array oldArr, int oldSize, int newSize, Type elemType)
         {
@@ -195,11 +259,8 @@ namespace TerrariaModder.Core.Assets
 
             if (elemType == typeof(int))
             {
-                // Sample the last few entries to detect the default value
-                // Most entries will be the default, only a few are overridden
-                var intArr = (int[])oldArr;
-                int defaultVal = DetectIntDefault(intArr);
-                if (defaultVal != 0) // 0 is already the default for new int[]
+                int defaultVal = (int)oldArr.GetValue(0);
+                if (defaultVal != 0)
                 {
                     var newIntArr = (int[])newArr;
                     for (int i = oldSize; i < newSize; i++)
@@ -208,8 +269,7 @@ namespace TerrariaModder.Core.Assets
             }
             else if (elemType == typeof(short))
             {
-                var shortArr = (short[])oldArr;
-                short defaultVal = DetectShortDefault(shortArr);
+                short defaultVal = (short)oldArr.GetValue(0);
                 if (defaultVal != 0)
                 {
                     var newShortArr = (short[])newArr;
@@ -219,8 +279,7 @@ namespace TerrariaModder.Core.Assets
             }
             else if (elemType == typeof(float))
             {
-                var floatArr = (float[])oldArr;
-                float defaultVal = DetectFloatDefault(floatArr);
+                float defaultVal = (float)oldArr.GetValue(0);
                 if (defaultVal != 0f)
                 {
                     var newFloatArr = (float[])newArr;
@@ -228,196 +287,21 @@ namespace TerrariaModder.Core.Assets
                         newFloatArr[i] = defaultVal;
                 }
             }
-            // bool arrays: default is false, which is already correct
-            // Reference arrays: default is null, which is already correct
-        }
-
-        private static int DetectIntDefault(int[] arr)
-        {
-            // Sample last 100 entries — the majority value is the default
-            int countNeg1 = 0, countZero = 0;
-            int sampleStart = Math.Max(0, arr.Length - 100);
-            for (int i = sampleStart; i < arr.Length; i++)
+            // bool arrays: default is false — already correct (Array.CreateInstance initialises to false)
+            // Reference arrays: fill with slot-0 value as placeholder
+            // (prevents NullReferenceException if vanilla code accesses custom type slots in
+            //  TextureAssets.Item[], Lang._itemNameCache[], etc.)
+            else if (!elemType.IsValueType)
             {
-                if (arr[i] == -1) countNeg1++;
-                else if (arr[i] == 0) countZero++;
-            }
-            return countNeg1 > countZero ? -1 : 0;
-        }
-
-        private static short DetectShortDefault(short[] arr)
-        {
-            int countNeg1 = 0, countZero = 0;
-            int sampleStart = Math.Max(0, arr.Length - 100);
-            for (int i = sampleStart; i < arr.Length; i++)
-            {
-                if (arr[i] == -1) countNeg1++;
-                else if (arr[i] == 0) countZero++;
-            }
-            return countNeg1 > countZero ? (short)-1 : (short)0;
-        }
-
-        private static float DetectFloatDefault(float[] arr)
-        {
-            int countOne = 0, countZero = 0;
-            int sampleStart = Math.Max(0, arr.Length - 100);
-            for (int i = sampleStart; i < arr.Length; i++)
-            {
-                if (Math.Abs(arr[i] - 1f) < 0.001f) countOne++;
-                else if (Math.Abs(arr[i]) < 0.001f) countZero++;
-            }
-            return countOne > countZero ? 1f : 0f;
-        }
-
-        private static int ResizeTextureAssets(int oldSize, int newSize)
-        {
-            int count = 0;
-            try
-            {
-                var texAssetsType = typeof(Terraria.GameContent.TextureAssets);
-
-                foreach (var fieldName in new[] { "Item", "ItemFlame" })
+                object placeholder = oldArr.GetValue(0);
+                if (placeholder != null)
                 {
-                    var field = texAssetsType.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
-                    if (field == null) continue;
-
-                    var arr = field.GetValue(null) as Array;
-                    if (arr == null || arr.Length != oldSize) continue;
-
-                    var elemType = field.FieldType.GetElementType();
-                    var newArr = Array.CreateInstance(elemType, newSize);
-                    Array.Copy(arr, newArr, arr.Length);
-
-                    // Fill new entries with the "air" item placeholder (slot 0)
-                    // to prevent null reference crashes if vanilla code accesses these slots
-                    var placeholder = arr.GetValue(0);
-                    if (placeholder != null)
-                    {
-                        for (int i = oldSize; i < newSize; i++)
-                            newArr.SetValue(placeholder, i);
-                    }
-
-                    field.SetValue(null, newArr);
-                    count++;
-                    _log?.Debug($"[TypeExtension] Resized TextureAssets.{fieldName}: {oldSize} → {newSize} (filled with placeholder)");
+                    for (int i = oldSize; i < newSize; i++)
+                        newArr.SetValue(placeholder, i);
                 }
             }
-            catch (Exception ex)
-            {
-                _log?.Error($"[TypeExtension] Error resizing TextureAssets: {ex.Message}");
-            }
-            return count;
         }
 
-        private static int ResizeLangCaches(int oldSize, int newSize)
-        {
-            int count = 0;
-            try
-            {
-                var langType = typeof(Terraria.Lang);
-
-                foreach (var fieldName in new[] { "_itemNameCache", "_itemTooltipCache" })
-                {
-                    var field = langType.GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static);
-                    if (field == null)
-                    {
-                        _log?.Debug($"[TypeExtension] Lang.{fieldName} not found");
-                        continue;
-                    }
-
-                    var arr = field.GetValue(null) as Array;
-                    if (arr == null || arr.Length != oldSize) continue;
-
-                    var elemType = field.FieldType.GetElementType();
-                    var newArr = Array.CreateInstance(elemType, newSize);
-                    Array.Copy(arr, newArr, arr.Length);
-
-                    // Fill new entries with the "air" item entry (slot 0)
-                    // to prevent null reference crashes
-                    var placeholder = arr.GetValue(0);
-                    if (placeholder != null)
-                    {
-                        for (int i = oldSize; i < newSize; i++)
-                            newArr.SetValue(placeholder, i);
-                    }
-
-                    field.SetValue(null, newArr);
-                    count++;
-                    _log?.Debug($"[TypeExtension] Resized Lang.{fieldName}: {oldSize} → {newSize} (filled with placeholder)");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log?.Error($"[TypeExtension] Error resizing Lang caches: {ex.Message}");
-            }
-            return count;
-        }
-
-        private static int ResizeMainArrays(int oldSize, int newSize)
-        {
-            int count = 0;
-            try
-            {
-                var mainType = typeof(Terraria.Main);
-                // Note: itemAnimationsRegistered is a List<int>, not an array — doesn't need resizing
-                var candidates = new[] { "itemAnimations" };
-
-                foreach (var fieldName in candidates)
-                {
-                    var field = mainType.GetField(fieldName,
-                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    if (field == null) continue;
-                    if (!field.FieldType.IsArray) continue;
-
-                    var arr = field.GetValue(null) as Array;
-                    if (arr == null || arr.Length != oldSize) continue;
-
-                    var elemType = field.FieldType.GetElementType();
-                    var newArr = Array.CreateInstance(elemType, newSize);
-                    Array.Copy(arr, newArr, arr.Length);
-                    field.SetValue(null, newArr);
-                    count++;
-                    _log?.Debug($"[TypeExtension] Resized Main.{fieldName}: {oldSize} → {newSize}");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log?.Error($"[TypeExtension] Error resizing Main arrays: {ex.Message}");
-            }
-            return count;
-        }
-
-        private static int ResizeItemArrays(int oldSize, int newSize)
-        {
-            int count = 0;
-            try
-            {
-                var itemType = typeof(Terraria.Item);
-                // Item.staff and Item.claw are bool[ItemID.Count] indexed by type
-                foreach (var fieldName in new[] { "staff", "claw" })
-                {
-                    var field = itemType.GetField(fieldName,
-                        BindingFlags.Public | BindingFlags.Static);
-                    if (field == null) continue;
-                    if (!field.FieldType.IsArray) continue;
-
-                    var arr = field.GetValue(null) as Array;
-                    if (arr == null || arr.Length != oldSize) continue;
-
-                    var elemType = field.FieldType.GetElementType();
-                    var newArr = Array.CreateInstance(elemType, newSize);
-                    Array.Copy(arr, newArr, arr.Length);
-                    field.SetValue(null, newArr);
-                    count++;
-                    _log?.Debug($"[TypeExtension] Resized Item.{fieldName}: {oldSize} → {newSize}");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log?.Error($"[TypeExtension] Error resizing Item arrays: {ex.Message}");
-            }
-            return count;
-        }
 
         /// <summary>
         /// Comprehensive scan: find ALL static array fields in the Terraria assembly

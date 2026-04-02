@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
 using Terraria;
 using TerrariaModder.Core;
+using TerrariaModder.Core.Debug;
 using TerrariaModder.Core.Events;
 using TerrariaModder.Core.Input;
 using TerrariaModder.Core.Logging;
@@ -13,7 +15,7 @@ using TerrariaModder.Core.UI.Widgets;
 
 namespace AdminPanel
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle, IModStateProvider, IModActionProvider
     {
         public string Id => "admin-panel";
         public string Name => "Admin Panel";
@@ -35,7 +37,7 @@ namespace AdminPanel
         private ILogger _log;
         private ModContext _context;
         private bool _enabled;
-        private bool _singleplayerOnly;
+        private AdminPanelConfig _config;
 
         private Action _pendingAction;
         private DraggablePanel _panel = new DraggablePanel("admin-panel", "Admin Panel", 380, 620);
@@ -46,6 +48,11 @@ namespace AdminPanel
 
         private int _normalRespawnIndex = NormalDefaultIndex;
         private int _bossRespawnIndex = BossDefaultIndex;
+
+        // Dungeon coordinates — requested from server in MP since Main.dungeonX/Y are not
+        // populated on MP clients (they come from WorldFile.Load, not from network packets).
+        private int _dungeonX = -1;
+        private int _dungeonY = -1;
 
         // Tab state
         private int _activeTab;
@@ -88,9 +95,16 @@ namespace AdminPanel
         {
             _log = context.Logger;
             _context = context;
+            _config = context.GetConfig<AdminPanelConfig>();
 
-            _enabled = context.Config.Get<bool>("enabled", true);
-            _singleplayerOnly = context.Config.Get<bool>("singleplayerOnly", true);
+            // No UI on dedicated server — all admin ops are server-authoritative
+            if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
+            {
+                _log.Info("AdminPanel: skipping UI init (dedicated server)");
+                return;
+            }
+
+            _enabled = _config != null ? _config.Enabled : true;
 
             if (!_enabled)
             {
@@ -112,9 +126,152 @@ namespace AdminPanel
             _patchTimer = new Timer(ApplyPatches, null, 5000, Timeout.Infinite);
 
             NPCSpawner.Init(_log);
+            TerrariaModder.Core.Net.NetSync.OnServerCommandResponse += OnServerCommandResponse;
+
+            context.RegisterStateProvider(this);
+            context.RegisterActionProvider(this);
 
             _log.Info("AdminPanel initialized - Press \\ to open panel, F9 for god mode");
         }
+
+        public Dictionary<string, object> GetModState()
+        {
+            return new Dictionary<string, object>
+            {
+                ["panelOpen"] = _panel.IsOpen,
+                ["godMode"] = _godModeActive,
+                ["timeSpeed"] = _timeSpeedMultiplier,
+                ["moveSpeed"] = _moveSpeedMultiplier,
+                ["biomeSpreadDisabled"] = _biomeSpreadDisabled,
+            };
+        }
+
+        public List<ModActionInfo> GetActions()
+        {
+            return new List<ModActionInfo>
+            {
+                new ModActionInfo("toggle_panel", "Open/close the admin panel"),
+                new ModActionInfo("toggle_god_mode", "Toggle invincibility"),
+                new ModActionInfo("heal", "Restore health to full"),
+                new ModActionInfo("restore_mana", "Restore mana to full"),
+                new ModActionInfo("instant_respawn", "Set respawn timer to 0"),
+                new ModActionInfo("set_time", "Set time of day",
+                    new ModActionParam("preset", "string", true, "dawn, noon, dusk, or night")),
+                new ModActionInfo("set_time_speed", "Set time speed multiplier",
+                    new ModActionParam("value", "int", true, "1-60")),
+                new ModActionInfo("set_move_speed", "Set movement speed multiplier",
+                    new ModActionParam("value", "int", true, "1-10")),
+                new ModActionInfo("toggle_biome_spread", "Toggle biome spread on/off"),
+                new ModActionInfo("teleport", "Teleport to a location",
+                    new ModActionParam("target", "string", true, "spawn, dungeon, hell, beach, bed, or random")),
+            };
+        }
+
+        public ModActionResult ExecuteAction(string name, Dictionary<string, string> args)
+        {
+            switch (name)
+            {
+                case "toggle_panel":
+                    OnToggleUI();
+                    EventLog.Emit("admin-panel", "toggle_panel", $"{{\"open\":{(_panel.IsOpen ? "true" : "false")}}}");
+                    return ModActionResult.Ok(_panel.IsOpen ? "Panel opened" : "Panel closed");
+                case "toggle_god_mode":
+                    OnToggleGodMode();
+                    EventLog.Emit("admin-panel", "toggle_god_mode", $"{{\"enabled\":{(_godModeActive ? "true" : "false")}}}");
+                    return ModActionResult.Ok(_godModeActive ? "God mode ON" : "God mode OFF");
+                case "heal":
+                    RestoreHealth();
+                    EventLog.Emit("admin-panel", "heal", "{\"action\":\"health_restored\"}");
+                    return ModActionResult.Ok("Health restored");
+                case "restore_mana":
+                    RestoreMana();
+                    EventLog.Emit("admin-panel", "restore_mana", "{\"action\":\"mana_restored\"}");
+                    return ModActionResult.Ok("Mana restored");
+                case "instant_respawn":
+                    InstantRespawn();
+                    EventLog.Emit("admin-panel", "instant_respawn", "{\"action\":\"respawn_cleared\"}");
+                    return ModActionResult.Ok("Respawn timer cleared");
+                case "set_time":
+                    string preset = args != null && args.ContainsKey("preset") ? args["preset"] : null;
+                    if (string.IsNullOrEmpty(preset))
+                        return ModActionResult.Fail("Missing 'preset' param (dawn/noon/dusk/night)");
+                    if (!SetTimePreset(preset))
+                        return ModActionResult.Fail("Permission denied or not in a world");
+                    EventLog.Emit("admin-panel", "set_time", $"{{\"preset\":\"{preset}\"}}");
+                    return ModActionResult.Ok($"Time set to {preset}");
+                case "set_time_speed":
+                    if (Main.netMode != 0 && !IsLocalAdmin())
+                        return ModActionResult.Fail("Time speed control requires Admin in multiplayer");
+                    if (args == null || !args.ContainsKey("value") || !int.TryParse(args["value"], out int ts))
+                        return ModActionResult.Fail("Missing or invalid 'value' param (1-60)");
+                    _timeSpeedMultiplier = Math.Max(1, Math.Min(60, ts));
+                    EventLog.Emit("admin-panel", "set_time_speed", $"{{\"value\":{_timeSpeedMultiplier}}}");
+                    return ModActionResult.Ok($"Time speed set to {_timeSpeedMultiplier}x");
+                case "set_move_speed":
+                    if (args == null || !args.ContainsKey("value") || !int.TryParse(args["value"], out int ms))
+                        return ModActionResult.Fail("Missing or invalid 'value' param (1-10)");
+                    _moveSpeedMultiplier = Math.Max(1, Math.Min(10, ms));
+                    EventLog.Emit("admin-panel", "set_move_speed", $"{{\"value\":{_moveSpeedMultiplier}}}");
+                    return ModActionResult.Ok($"Move speed set to {_moveSpeedMultiplier}x");
+                case "toggle_biome_spread":
+                    _biomeSpreadDisabled = !_biomeSpreadDisabled;
+                    if (!_biomeSpreadDisabled)
+                        try { Terraria.WorldGen.AllowedToSpreadInfections = true; } catch { }
+                    EventLog.Emit("admin-panel", "toggle_biome_spread", $"{{\"disabled\":{(_biomeSpreadDisabled ? "true" : "false")}}}");
+                    return ModActionResult.Ok(_biomeSpreadDisabled ? "Biome spread disabled" : "Biome spread enabled");
+                case "teleport":
+                    string target = args != null && args.ContainsKey("target") ? args["target"] : null;
+                    if (string.IsNullOrEmpty(target))
+                        return ModActionResult.Fail("Missing 'target' param (spawn/dungeon/hell/beach/bed/random)");
+                    try
+                    {
+                        switch (target.ToLower())
+                        {
+                            case "spawn": TeleportToSpawn(); break;
+                            case "dungeon": TeleportToDungeon(); break;
+                            case "hell": TeleportToHell(); break;
+                            case "beach": TeleportToBeach(); break;
+                            case "bed": TeleportToBed(); break;
+                            case "random": TeleportRandom(); break;
+                            default: return ModActionResult.Fail($"Unknown teleport target: {target}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        return ModActionResult.Fail(ex.Message);
+                    }
+                    EventLog.Emit("admin-panel", "teleport", $"{{\"target\":\"{target}\"}}");
+                    return ModActionResult.Ok($"Teleported to {target}");
+                default:
+                    return null;
+            }
+        }
+
+        public void OnContentReady(ModContext context) { }
+
+        private void OnServerCommandResponse(string type, string result)
+        {
+            if (type != "worldcoords") return;
+            // payload: "dungeonX,dungeonY"
+            var parts = result.Split(',');
+            if (parts.Length == 2 &&
+                int.TryParse(parts[0], out int dx) &&
+                int.TryParse(parts[1], out int dy))
+            {
+                _dungeonX = dx;
+                _dungeonY = dy;
+                _log.Info($"[AdminPanel] Received dungeon coords: ({dx}, {dy})");
+
+                // If a dungeon teleport was deferred, execute it now
+                if (_pendingDungeonTeleport)
+                {
+                    _pendingDungeonTeleport = false;
+                    _pendingAction = DoTeleportToDungeon;
+                }
+            }
+        }
+
+        private bool _pendingDungeonTeleport;
 
         public void OnWorldLoad()
         {
@@ -128,6 +285,9 @@ namespace AdminPanel
         {
             _panel.Close();
             _inBossFight = false;
+            _dungeonX = -1;
+            _dungeonY = -1;
+            _pendingDungeonTeleport = false;
             // Reset game state but keep settings
             try { Main.dayRate = 1; } catch { }
             // Restore biome spread for save safety
@@ -148,10 +308,13 @@ namespace AdminPanel
             _godModeActive = false;
             _timeSpeedMultiplier = 1;
             _moveSpeedMultiplier = 1;
+            _normalRespawnMult = 1.0f;
+            _bossRespawnMult = 1.0f;
             _biomeSpreadDisabled = false;
             // Restore biome spread on unload
             try { WorldGen.AllowedToSpreadInfections = true; } catch { }
             try { Main.dayRate = 1; } catch { }
+            TerrariaModder.Core.Net.NetSync.OnServerCommandResponse -= OnServerCommandResponse;
             NPCSpawner.Unload();
             _log.Info("AdminPanel unloaded");
         }
@@ -164,11 +327,11 @@ namespace AdminPanel
         {
             try
             {
-                _godModeActive = _context.Config.Get<bool>("godMode", false);
-                _timeSpeedMultiplier = _context.Config.Get<int>("timeSpeed", 1);
-                _normalRespawnIndex = _context.Config.Get<int>("normalRespawnIndex", NormalDefaultIndex);
-                _bossRespawnIndex = _context.Config.Get<int>("bossRespawnIndex", BossDefaultIndex);
-                _moveSpeedMultiplier = _context.Config.Get<int>("moveSpeed", 1);
+                _godModeActive = _config != null ? _config.GodMode : false;
+                _timeSpeedMultiplier = _config != null ? _config.TimeSpeed : 1;
+                _normalRespawnIndex = _config != null ? _config.NormalRespawnIndex : NormalDefaultIndex;
+                _bossRespawnIndex = _config != null ? _config.BossRespawnIndex : BossDefaultIndex;
+                _moveSpeedMultiplier = _config != null ? _config.MoveSpeed : 1;
 
                 // Clamp to valid ranges
                 _timeSpeedMultiplier = Math.Max(1, Math.Min(60, _timeSpeedMultiplier));
@@ -188,17 +351,17 @@ namespace AdminPanel
                 _prevMoveSpeed = _moveSpeedMultiplier;
 
                 // Biome spread
-                _biomeSpreadDisabled = _context.Config.Get<bool>("biomeSpreadDisabled", false);
+                _biomeSpreadDisabled = _config != null ? _config.BiomeSpreadDisabled : false;
                 _prevBiomeSpread = _biomeSpreadDisabled;
 
                 // NPC Spawner favourites
-                string bossFavs = _context.Config.Get<string>("bossFavourites", "");
-                string npcFavs = _context.Config.Get<string>("npcFavourites", "");
+                string bossFavs = _config != null ? _config.BossFavourites : "";
+                string npcFavs = _config != null ? _config.NpcFavourites : "";
                 _prevBossFavs = bossFavs;
                 _prevNpcFavs = npcFavs;
                 NPCSpawner.LoadFavourites(bossFavs, npcFavs);
 
-                bool rightClickSpawn = _context.Config.Get<bool>("rightClickSpawn", false);
+                bool rightClickSpawn = _config != null ? _config.RightClickSpawn : false;
                 _prevRightClickSpawn = rightClickSpawn;
                 NPCSpawner.LoadRightClickSpawn(rightClickSpawn);
 
@@ -217,11 +380,21 @@ namespace AdminPanel
                 previous = current;
                 try
                 {
-                    _context.Config.Set<T>(key, current);
-                    _context.Config.Save();
+                    if (_config != null)
+                    {
+                        string propName = char.ToUpper(key[0]) + key.Substring(1);
+                        var prop = _config.GetType().GetProperty(propName);
+                        prop?.SetValue(_config, current);
+                        _config.Save();
+                    }
                 }
                 catch { }
             }
+        }
+
+        private void SaveConfigSetting<T>(string key, T current, ref T previous) where T : IEquatable<T>
+        {
+            SaveSettingIfChanged(key, current, ref previous);
         }
 
         #endregion
@@ -302,6 +475,7 @@ namespace AdminPanel
                     __instance.immune = true;
                     __instance.immuneTime = 2;
                     __instance.immuneNoBlink = true;
+                    __instance.creativeGodMode = true;
                 }
             }
             catch { }
@@ -426,24 +600,21 @@ namespace AdminPanel
                 if (bossFavs != _prevBossFavs)
                 {
                     _prevBossFavs = bossFavs;
-                    _context.Config.Set("bossFavourites", bossFavs);
-                    _context.Config.Save();
+                    if (_config != null) { _config.BossFavourites = bossFavs; _config.Save(); }
                 }
 
                 string npcFavs = NPCSpawner.SaveNPCFavourites();
                 if (npcFavs != _prevNpcFavs)
                 {
                     _prevNpcFavs = npcFavs;
-                    _context.Config.Set("npcFavourites", npcFavs);
-                    _context.Config.Save();
+                    if (_config != null) { _config.NpcFavourites = npcFavs; _config.Save(); }
                 }
 
                 bool rcs = NPCSpawner.RightClickSpawnEnabled;
                 if (rcs != _prevRightClickSpawn)
                 {
                     _prevRightClickSpawn = rcs;
-                    _context.Config.Set("rightClickSpawn", rcs);
-                    _context.Config.Save();
+                    if (_config != null) { _config.RightClickSpawn = rcs; _config.Save(); }
                 }
             }
             catch { }
@@ -455,23 +626,11 @@ namespace AdminPanel
 
         private void OnToggleUI()
         {
-            if (_singleplayerOnly && Main.netMode != 0)
-            {
-                _log.Warn("AdminPanel is disabled in multiplayer");
-                return;
-            }
-
             _panel.Toggle();
         }
 
         private void OnToggleGodMode()
         {
-            if (_singleplayerOnly && Main.netMode != 0)
-            {
-                _log.Warn("God mode is disabled in multiplayer");
-                return;
-            }
-
             _godModeActive = !_godModeActive;
             _log.Info($"God mode: {(_godModeActive ? "ON" : "OFF")}");
 
@@ -496,6 +655,12 @@ namespace AdminPanel
 
         private void OnDraw()
         {
+            // Draw god mode HUD indicator regardless of panel state
+            if (_godModeActive)
+            {
+                UIRenderer.DrawText("GOD", UIRenderer.ScreenWidth - 50, 8, 255, 215, 0, 200);
+            }
+
             if (!_panel.BeginDraw()) return;
             try
             {
@@ -556,22 +721,37 @@ namespace AdminPanel
             SaveSettingIfChanged("moveSpeed", _moveSpeedMultiplier, ref _prevMoveSpeed);
 
             // ---- TIME ----
-            s.SectionHeader("TIME");
+            bool isAdmin = IsLocalAdmin();
+            bool inMp = Main.netMode != 0;
+            string adminSuffix = (inMp && !isAdmin) ? " [Admin]" : "";
+            s.SectionHeader($"TIME{adminSuffix}");
             int qw = (s.Width - 24) / 4;
-            if (s.ButtonAt(s.X, qw, "Dawn")) SetTime(true, 0);
-            if (s.ButtonAt(s.X + qw + 8, qw, "Noon")) SetTime(true, 27000);
-            if (s.ButtonAt(s.X + (qw + 8) * 2, qw, "Dusk")) SetTime(false, 0);
-            if (s.ButtonAt(s.X + (qw + 8) * 3, qw, "Night")) SetTime(false, 16200);
+            bool canSetTime = !(inMp && !isAdmin);
+            if (s.ButtonAt(s.X, qw, "Dawn")               && canSetTime) SetTimePreset("dawn");
+            if (s.ButtonAt(s.X + qw + 8, qw, "Noon")      && canSetTime) SetTimePreset("noon");
+            if (s.ButtonAt(s.X + (qw + 8) * 2, qw, "Dusk") && canSetTime) SetTimePreset("dusk");
+            if (s.ButtonAt(s.X + (qw + 8) * 3, qw, "Night") && canSetTime) SetTimePreset("night");
             s.Advance(26);
 
-            sy = s.Advance(SliderHeight);
-            UIRenderer.DrawText("Speed:", s.X, sy + 2, UIColors.TextDim);
-            _timeSpeedMultiplier = _timeSlider.Draw(s.X + 50, sy, s.Width - 50 - labelW, SliderHeight,
-                _timeSpeedMultiplier, 1, 60);
-            string timeLabel = _timeSpeedMultiplier == 1 ? "1x (normal)" : $"{_timeSpeedMultiplier}x";
-            var timeLabelColor = _timeSpeedMultiplier == 1 ? UIColors.TextHint : UIColors.AccentText;
-            UIRenderer.DrawText(timeLabel, s.X + s.Width - UIRenderer.MeasureText(timeLabel), sy + 2, timeLabelColor);
-            SaveSettingIfChanged("timeSpeed", _timeSpeedMultiplier, ref _prevTimeSpeed);
+            if (canSetTime)
+            {
+                bool isPureMpClient = Main.netMode == 1 && !Netplay.IsHostAndPlay;
+                sy = s.Advance(SliderHeight);
+                if (isPureMpClient)
+                {
+                    UIRenderer.DrawText("Speed: Host only", s.X, sy + 2, UIColors.TextHint);
+                }
+                else
+                {
+                    UIRenderer.DrawText("Speed:", s.X, sy + 2, UIColors.TextDim);
+                    _timeSpeedMultiplier = _timeSlider.Draw(s.X + 50, sy, s.Width - 50 - labelW, SliderHeight,
+                        _timeSpeedMultiplier, 1, 60);
+                    string timeLabel = _timeSpeedMultiplier == 1 ? "1x (normal)" : $"{_timeSpeedMultiplier}x";
+                    var timeLabelColor = _timeSpeedMultiplier == 1 ? UIColors.TextHint : UIColors.AccentText;
+                    UIRenderer.DrawText(timeLabel, s.X + s.Width - UIRenderer.MeasureText(timeLabel), sy + 2, timeLabelColor);
+                    SaveSettingIfChanged("timeSpeed", _timeSpeedMultiplier, ref _prevTimeSpeed);
+                }
+            }
 
             // ---- TELEPORT ----
             s.SectionHeader("TELEPORT");
@@ -664,15 +844,42 @@ namespace AdminPanel
             catch (Exception ex) { _log.Error($"Failed to restore mana: {ex.Message}"); }
         }
 
-        private void SetTime(bool dayTime, double time)
+        private bool IsLocalAdmin()
         {
+            if (Main.netMode == 0) return true; // singleplayer: always admin
+            return TerrariaModder.Core.Net.NetSync.LocalPlayerIsAdmin;
+        }
+
+        private bool SetTimePreset(string preset)
+        {
+            if (Main.netMode != 0 && !Netplay.IsHostAndPlay)
+            {
+                // Pure multiplayer client: send server command (server validates admin, applies, broadcasts)
+                if (!IsLocalAdmin())
+                {
+                    try { Main.NewText("[AdminPanel] Time control requires Admin.", 255, 80, 80); } catch { }
+                    return false;
+                }
+                TerrariaModder.Core.Net.NetSync.SendServerCommandRequest("time", preset);
+                return true;
+            }
+
+            // SP or H&P host: apply directly and broadcast to clients
             try
             {
-                Main.dayTime = dayTime;
-                Main.time = time;
-                _log.Info($"Time set to {(dayTime ? "day" : "night")} {time}");
+                switch (preset)
+                {
+                    case "dawn":  Main.dayTime = true;  Main.time = 0.0;     break;
+                    case "noon":  Main.dayTime = true;  Main.time = 27000.0; break;
+                    case "dusk":  Main.dayTime = false; Main.time = 0.0;     break;
+                    case "night": Main.dayTime = false; Main.time = 16200.0; break;
+                }
+                if (Main.netMode != 0)
+                    NetMessage.SendData(7); // broadcast time to all clients
+                _log.Info($"Time set to {preset}");
+                return true;
             }
-            catch (Exception ex) { _log.Error($"Failed to set time: {ex.Message}"); }
+            catch (Exception ex) { _log.Error($"Failed to set time: {ex.Message}"); return false; }
         }
 
         private void InstantRespawn()
@@ -704,31 +911,94 @@ namespace AdminPanel
         {
             try
             {
-                TeleportPlayer(Main.dungeonX * 16f + 8f - 10f, Main.dungeonY * 16f - 42f);
+                if (Main.netMode == 0 || Main.netMode == 2)
+                {
+                    // SP or ded server host: Main.dungeonX/Y populated from WorldFile.Load
+                    if (Main.dungeonX <= 0 || Main.dungeonY <= 0)
+                    {
+                        _log.Info("[AdminPanel] Dungeon not found in this world (dungeonX/Y = -1)");
+                        throw new InvalidOperationException("Dungeon not found in this world");
+                    }
+                    TeleportPlayer(Main.dungeonX * 16f + 8f - 10f, Main.dungeonY * 16f - 42f);
+                }
+                else
+                {
+                    // Client (netMode==1, including H&P host): Main.dungeonX/Y are NOT populated.
+                    // If we have cached coords, use them. Otherwise request from server.
+                    if (_dungeonX > 0 || _dungeonY > 0)
+                    {
+                        DoTeleportToDungeon();
+                    }
+                    else
+                    {
+                        _log.Info("[AdminPanel] Requesting dungeon coords from server...");
+                        _pendingDungeonTeleport = true;
+                        TerrariaModder.Core.Net.NetSync.SendServerCommandRequest("worldcoords", "");
+                        throw new InvalidOperationException("Dungeon coords requested from server — teleport will complete when response arrives");
+                    }
+                }
             }
-            catch (Exception ex) { _log.Error($"Failed to teleport to dungeon: {ex.Message}"); }
+            catch (Exception ex) { _log.Error($"Failed to teleport to dungeon: {ex.Message}"); throw; }
+        }
+
+        private void DoTeleportToDungeon()
+        {
+            if (_dungeonX <= 0 || _dungeonY <= 0)
+            {
+                _log.Info("[AdminPanel] Dungeon not found in this world (coords = -1)");
+                return;
+            }
+            TeleportPlayer(_dungeonX * 16f + 8f - 10f, _dungeonY * 16f - 42f);
         }
 
         private void TeleportToHell()
         {
             try
             {
-                Player player = Main.player[Main.myPlayer];
-                player.DemonConch();
-                _log.Info("Teleported to hell (demon conch)");
+                if (Main.netMode == 0 || Main.netMode == 2)
+                {
+                    // SP or ded server host: full world loaded, call directly
+                    var player = Main.player[Main.myPlayer];
+                    var posBefore = player.position;
+                    player.DemonConch();
+                    if (player.position == posBefore)
+                        throw new InvalidOperationException("Hell teleport failed — no valid underworld location found (small world?)");
+                    _log.Info("Teleported to hell (DemonConch)");
+                }
+                else
+                {
+                    // Client (netMode==1, including H&P host): send packet 73 byte=2 — server calls DemonConch()
+                    // with all tiles loaded, broadcasts result via packet 65.
+                    NetMessage.SendData(73, -1, -1, null, 2);
+                    _log.Info("Teleported to hell (packet 73/DemonConch)");
+                }
             }
-            catch (Exception ex) { _log.Error($"Failed to teleport to hell: {ex.Message}"); }
+            catch (Exception ex) { _log.Error($"Failed to teleport to hell: {ex.Message}"); throw; }
         }
 
         private void TeleportToBeach()
         {
             try
             {
-                Player player = Main.player[Main.myPlayer];
-                player.MagicConch();
-                _log.Info("Teleported to beach (magic conch)");
+                if (Main.netMode == 0 || Main.netMode == 2)
+                {
+                    // SP or ded server host: full world loaded, call directly
+                    var player = Main.player[Main.myPlayer];
+                    var posBefore = player.position;
+                    player.MagicConch();
+                    if (player.position == posBefore)
+                        throw new InvalidOperationException("Beach teleport failed — no valid ocean location found (small world?)");
+                    _log.Info("Teleported to beach (MagicConch)");
+                }
+                else
+                {
+                    // Client (netMode==1, including H&P host): send packet 73 byte=1 — server calls MagicConch()
+                    // with all tiles loaded, broadcasts result via packet 65.
+                    NetMessage.SendData(73, -1, -1, null, 1);
+                    _log.Info("Teleported to beach (packet 73/MagicConch)");
+                }
             }
-            catch (Exception ex) { _log.Error($"Failed to teleport to beach: {ex.Message}"); }
+            catch (Exception ex) { _log.Error($"Failed to teleport to beach: {ex.Message}"); throw; }
         }
 
         private void TeleportToBed()

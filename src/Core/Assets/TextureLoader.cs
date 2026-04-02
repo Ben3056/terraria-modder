@@ -167,15 +167,22 @@ namespace TerrariaModder.Core.Assets
 
                 if (instance == null) return null;
 
-                // Set Value via auto-property backing field (verified pattern from ItemTexturePatches)
-                var valueField = assetType.GetField("<Value>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? assetType.GetField("_value", BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? assetType.GetField("ownValue", BindingFlags.NonPublic | BindingFlags.Instance);
+                // Find the Texture2D backing field by type rather than by name.
+                // Name-based probing breaks across XNA/FNA versions; the field type is stable.
+                FieldInfo valueField = null;
+                foreach (var f in assetType.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (f.FieldType == _texture2dType)
+                    {
+                        valueField = f;
+                        break;
+                    }
+                }
 
                 if (valueField != null)
                 {
                     valueField.SetValue(instance, texture);
-                    _log?.Debug($"[TextureLoader] Set value via {valueField.Name}");
+                    _log?.Debug($"[TextureLoader] Set value via {valueField.Name} (type-based discovery)");
                 }
 
                 // Mark as loaded — State property prevents LoadItem from trying to reload
@@ -249,6 +256,39 @@ namespace TerrariaModder.Core.Assets
             {
                 _log?.Debug($"[TextureLoader] Failed to set placeholder for type {runtimeType}: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Verify that all cached Asset objects are still present in TextureAssets.Item[].
+        /// Returns true if all injected slots still hold the expected Asset reference.
+        /// Returns false if any slot was overwritten (re-injection needed).
+        /// </summary>
+        public static bool VerifyTextures()
+        {
+            if (_assetCache.Count == 0) return true;
+
+            try
+            {
+                var texAssetsType = typeof(Terraria.GameContent.TextureAssets);
+                var itemField = texAssetsType.GetField("Item", BindingFlags.Public | BindingFlags.Static);
+                if (itemField == null) return true;
+
+                var itemArray = itemField.GetValue(null) as Array;
+                if (itemArray == null) return true;
+
+                foreach (var kvp in _assetCache)
+                {
+                    if (kvp.Key < 0 || kvp.Key >= itemArray.Length) continue;
+                    // Reference equality: any overwrite (even to same value) resets the reference
+                    if (!ReferenceEquals(itemArray.GetValue(kvp.Key), kvp.Value))
+                        return false;
+                }
+                return true;
+            }
+            catch
+            {
+                return true; // Can't verify — assume stable
             }
         }
 

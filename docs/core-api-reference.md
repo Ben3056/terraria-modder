@@ -20,18 +20,32 @@ public interface IMod
     string Version { get; }
 
     void Initialize(ModContext context);
-    void OnWorldLoad();
-    void OnWorldUnload();
     void Unload();
 }
 ```
 
+For world lifecycle hooks, optionally implement `IModLifecycle`:
+
+```csharp
+public interface IModLifecycle
+{
+    void OnContentReady(ModContext context);  // All mods initialized, runtime type IDs assigned
+    void OnWorldLoad();                       // Entering a world
+    void OnWorldUnload();                     // Leaving a world
+}
+```
+
+**Why two interfaces?** `IModLifecycle` is separate for backward compatibility. Old mods compiled against earlier Core versions that only implement `IMod` will still load correctly — the framework checks for `IModLifecycle` via type casting and only calls the hooks if the mod implements it.
+
+**Recompilation required for Core 0.4.0+:** While old DLLs that only use `IMod` + `Initialize` + `Unload` will load, mods that reference changed APIs (like the old `IModConfig` interface) need to be recompiled against the new Core. The injector handles this gracefully — incompatible mods log a clear error and are skipped, without crashing the game or affecting other mods.
+
 ### IMod Lifecycle
 
 1. `Initialize()` - Called when mod loads. Set up config, keybinds, UI, events.
-2. `OnWorldLoad()` - Called when entering a world.
-3. `OnWorldUnload()` - Called when leaving a world.
-4. `Unload()` - Called when game closes. Clean up resources.
+2. `OnContentReady()` *(IModLifecycle)* - Called after all mods initialized and runtime type IDs assigned. Use for cross-mod item lookups (`context.GetItemType`, `context.TryGetItemType`).
+3. `OnWorldLoad()` *(IModLifecycle)* - Called when entering a world.
+4. `OnWorldUnload()` *(IModLifecycle)* - Called when leaving a world.
+5. `Unload()` - Called when game closes. Clean up resources.
 
 ### Injector Lifecycle Hooks
 
@@ -93,8 +107,8 @@ public void Initialize(ModContext context)
     // Logging
     ILogger log = context.Logger;
 
-    // Configuration (null if mod has no config_schema)
-    IModConfig config = context.Config;
+    // Typed configuration (returns your ModConfig subclass, or null if none registered)
+    var config = context.GetConfig<MyModConfig>();
 
     // Mod folder path
     string path = context.ModFolder;
@@ -112,7 +126,7 @@ public void Initialize(ModContext context)
 | Member | Type | Description |
 |--------|------|-------------|
 | `Logger` | `ILogger` | Per-mod logger instance |
-| `Config` | `IModConfig` | Mod configuration (null if no config_schema) |
+| `Config` | `ModConfig` | Mod configuration base (use `GetConfig<T>()` for typed access) |
 | `ModFolder` | `string` | Path to the mod's folder |
 | `Manifest` | `ModManifest` | Parsed manifest.json data |
 
@@ -206,82 +220,93 @@ Log output format:
 
 All logs go to `TerrariaModder/core/logs/terrariamodder.log`.
 
-## IModConfig
+## Config System
 
-Access and manage user configuration defined in manifest.json:
+Configuration is defined by subclassing `ModConfig` with typed properties and attributes. The framework reflects on the class to generate settings UI automatically and serializes to JSON. No `config_schema` in manifest.json is needed.
+
+### Defining a Config Class
 
 ```csharp
-// Get typed value
-bool enabled = config.Get<bool>("enabled");
-int count = config.Get<int>("item_count");
-string name = config.Get<string>("player_name");
-float speed = config.Get<float>("move_speed");
+using TerrariaModder.Core.Config;
 
-// With default fallback
-int value = config.Get<int>("count", 10);
-
-// Try pattern (safe retrieval)
-if (config.TryGet<bool>("flag", out bool flag))
+public class MyModConfig : ModConfig
 {
-    // flag was found and retrieved
+    public override int Version => 1;
+
+    [Client, Label("Enabled"), Description("Enable or disable the mod.")]
+    public bool Enabled { get; set; } = true;
+
+    [Client, Label("Count"), Description("Maximum item count."), Range(1, 100)]
+    public int Count { get; set; } = 10;
+
+    [Client, Label("Speed"), Description("Movement speed multiplier."), Range(0.1f, 10.0f)]
+    public float Speed { get; set; } = 1.5f;
+
+    [Client, Label("Player Name"), Description("Display name.")]
+    public string PlayerName { get; set; } = "Player";
 }
-
-// Check if key exists
-if (config.HasKey("optional_setting"))
-{
-    // Key exists in config
-}
-
-// Modify config values
-config.Set<int>("count", 25);
-config.Set<bool>("enabled", false);
-
-// Persistence
-config.Save();           // Save changes to disk
-config.Reload();         // Reload from disk (discards unsaved changes)
-config.ResetToDefaults(); // Reset all values to manifest defaults
-
-// Properties
-bool dirty = config.HasUnsavedChanges;  // True if Set() called since last Save()
-string path = config.FilePath;          // Path to config.json file
-IReadOnlyDictionary<string, ConfigField> schema = config.Schema;  // Schema definition
-
-// Events
-config.OnValueChanged += (string key) =>
-{
-    _log.Info($"Config '{key}' was changed");
-};
-
-config.OnConfigReloaded += () =>
-{
-    _log.Info("Config was reloaded from disk");
-};
 ```
 
-### IModConfig Members
+### Using Config in Your Mod
+
+```csharp
+// In Initialize() or OnContentReady():
+var config = context.GetConfig<MyModConfig>();
+bool enabled = config.Enabled;  // Direct typed property access
+int count = config.Count;
+
+// Modify and save
+config.Count = 25;
+config.Save();
+
+// Other operations
+config.Reload();          // Reload from disk
+config.ResetToDefaults(); // Reset all properties to declared defaults
+```
+
+### Config Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `[Client]` | Client-scoped property (default if untagged) |
+| `[Server]` | Server-scoped property (synced to clients in multiplayer) |
+| `[Label("...")]` | Display label in settings UI |
+| `[Description("...")]` | Tooltip description |
+| `[Range(min, max)]` | Numeric range constraint (shows slider in UI) |
+| `[Options("a", "b", "c")]` | Dropdown options for string properties |
+| `[RestartRequired]` | Marks property as requiring restart to take effect |
+| `[FormerlySerializedAs("oldName")]` | Migration support for renamed properties |
+
+### ModConfig Members
 
 | Member | Description |
 |--------|-------------|
-| `Get<T>(key)` | Get config value, throws if not found |
-| `Get<T>(key, default)` | Get config value with fallback |
-| `TryGet<T>(key, out value)` | Try to get value, returns false if not found |
-| `Set<T>(key, value)` | Set a config value |
-| `HasKey(key)` | Check if key exists |
-| `Save()` | Persist changes to disk |
+| `Version` | Abstract property — config schema version for migration |
+| `Save()` | Persist current values to disk |
 | `Reload()` | Reload from disk |
-| `ResetToDefaults()` | Reset all values to defaults |
-| `HasUnsavedChanges` | True if unsaved changes exist |
-| `FilePath` | Path to config file |
-| `Schema` | Config field definitions |
-| `OnValueChanged` | Event fired when value changes |
-| `OnConfigReloaded` | Event fired on reload |
+| `ResetToDefaults()` | Reset all properties to declared default values |
+| `HasChangesFromBaseline()` | True if any property differs from startup value |
+| `HasRestartRequiredChanges()` | True if any `[RestartRequired]` property changed |
+| `GetPropertyMetadata()` | Get metadata for all config properties |
+| `FilePath` | Path to the config JSON file |
 
-**ModConfig-only methods** (cast from IModConfig if needed):
+Config files are stored in `TerrariaModder/core/configs/{mod-id}.client.json` (and `.server.json` for server-scoped properties).
 
-| Member | Description |
-|--------|-------------|
-| `HasChangesFromBaseline()` | Check if values differ from startup (for restart detection) |
-| `Dispose()` | Clean up file watcher (called automatically by framework) |
+### Migration from Legacy Config
+
+If your mod previously used the old `config_schema` system (per-mod `config.json` files in `mods/{id}/`), user settings are **automatically migrated** to the new system on first load:
+
+1. **Legacy path** (`mods/{id}/config.json`) → migrated to `core/configs/{id}.client.json`
+2. **Key format** — camelCase keys are matched case-insensitively to PascalCase properties
+3. **FormerlySerializedAs** — use `[FormerlySerializedAs("oldName")]` on properties you've renamed
+
+The automatic migration ensures existing users keep their settings when you update your mod. However, **we encourage all mod authors to adopt the new class-based config system** — it provides:
+- Auto-generated F6 settings UI (no manual UI code needed)
+- `[Server]`/`[Client]` scoping for multiplayer
+- Type-safe properties with validation attributes (`[Range]`, `[Options]`)
+- Hot reload via `OnConfigChanged()`
+
+The legacy migration layer will eventually be removed in a future Core version. Plan to migrate your config when convenient.
 
 ### Hot Reload Support
 
@@ -292,72 +317,45 @@ Implement `OnConfigChanged()` in your mod class to handle live config updates fr
 ```csharp
 public class Mod : IMod
 {
-    private bool _enabled;
-    private int _maxItems;
+    private MyModConfig _config;
     private ModContext _context;
 
     public void Initialize(ModContext context)
     {
         _context = context;
-        LoadConfig();
+        _config = context.GetConfig<MyModConfig>();
     }
 
     // Called by mod menu automatically when a config value changes
     public void OnConfigChanged()
     {
-        LoadConfig();
-        _context.Logger.Info("Config reloaded!");
-    }
-
-    private void LoadConfig()
-    {
-        var config = _context.Config;
-        _enabled = config.Get<bool>("enabled");
-        _maxItems = config.Get<int>("maxItems");
+        _context.Logger.Info($"Config reloaded: Enabled={_config.Enabled}, Count={_config.Count}");
     }
 }
 ```
 
 All config changes are saved to disk immediately. If you implement `OnConfigChanged()`, the mod is also notified in real-time. Without it, the mod menu shows "Game Restart Required" since changes only take effect after restart.
 
-### Config Types
+### Version Migration
 
-Defined in `manifest.json` under `config_schema`:
+Override `Migrate()` to handle schema changes between versions:
 
-```json
+```csharp
+public class MyModConfig : ModConfig
 {
-  "config_schema": {
-    "enabled": {
-      "type": "bool",
-      "default": true,
-      "label": "Enabled"
-    },
-    "count": {
-      "type": "int",
-      "default": 10,
-      "min": 1,
-      "max": 100,
-      "label": "Count"
-    },
-    "speed": {
-      "type": "float",
-      "default": 1.5,
-      "min": 0.1,
-      "max": 10.0,
-      "label": "Speed"
-    },
-    "name": {
-      "type": "string",
-      "default": "Player",
-      "label": "Name"
-    },
-    "mode": {
-      "type": "enum",
-      "options": ["easy", "normal", "hard"],
-      "default": "normal",
-      "label": "Mode"
+    public override int Version => 2;
+
+    [Client, Label("Scan Radius")]
+    public int ScanRadius { get; set; } = 30;
+
+    protected override void Migrate(Dictionary<string, object> raw, int fromVersion)
+    {
+        if (fromVersion < 2 && raw.ContainsKey("oldRadius"))
+        {
+            raw["ScanRadius"] = raw["oldRadius"];
+            raw.Remove("oldRadius");
+        }
     }
-  }
 }
 ```
 
@@ -1531,27 +1529,26 @@ Game.ShowMessage("Hello!", r, g, b);
 bool success = Game.PlaceTile(tileX, tileY, tileType, style);
 ```
 
-## ConfigField
+## ConfigPropertyMeta
 
-Metadata for a configuration field (from manifest config_schema).
+Metadata for a configuration property (built from `ModConfig` subclass attributes).
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `Key` | `string` | Field key/name |
-| `Type` | `ConfigFieldType` | Field type (Bool, Int, Float, String, Key, Enum) |
-| `Default` | `object` | Default value |
-| `Label` | `string` | Display label for UI |
-| `Description` | `string` | Tooltip text |
-| `Min` | `double?` | Minimum (numeric) |
-| `Max` | `double?` | Maximum (numeric) |
-| `Step` | `double?` | Step increment (numeric) |
-| `MaxLength` | `int?` | Max length (string) |
-| `Pattern` | `string` | Regex pattern for validation (string) |
-| `Options` | `List<string>` | Valid options (enum) |
+| `Property` | `PropertyInfo` | The reflected property |
+| `Key` | `string` | Property name (JSON key) |
+| `Label` | `string` | Display label from `[Label]` attribute |
+| `Description` | `string` | Tooltip from `[Description]` attribute |
+| `Scope` | `ConfigScope` | `Client` or `Server` |
+| `RestartRequired` | `bool` | True if `[RestartRequired]` attribute present |
+| `Min` | `float?` | Minimum from `[Range]` attribute |
+| `Max` | `float?` | Maximum from `[Range]` attribute |
+| `Options` | `string[]` | Valid options from `[Options]` attribute |
+| `FormerNames` | `string[]` | Old property names from `[FormerlySerializedAs]` |
 
 **Methods:**
-- `bool Validate(object value, out string error)` - Validate against constraints
-- `object Clamp(object value)` - Clamp to valid range
+- `object GetValue(ModConfig instance)` - Get current property value
+- `void SetValue(ModConfig instance, object value)` - Set property value
 
 ## CommandRegistry
 
@@ -1632,17 +1629,7 @@ CommandRegistry.Clear();
 
 The framework includes Harmony for runtime patching. See [Harmony Basics](harmony-basics.md) for detailed usage.
 
-**Attribute-based patches** are auto-applied by the injector at startup, no `PatchAll()` call needed:
-
-```csharp
-// This patch is applied automatically by the injector
-[HarmonyPatch(typeof(Terraria.Player), "Update")]
-public static class PlayerUpdatePatch
-{
-    [HarmonyPostfix]
-    public static void Postfix(Player __instance) { /* ... */ }
-}
-```
+All mod patches must be applied **manually** using `_harmony.Patch()`. Attribute-based `[HarmonyPatch]` attributes are only used internally by the Core framework and are not auto-applied for mods.
 
 **Manual patches** should be applied in the `OnGameReady` lifecycle hook:
 

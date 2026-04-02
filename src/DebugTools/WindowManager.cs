@@ -20,6 +20,13 @@ namespace DebugTools
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetConsoleWindow();
 
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        private const uint WM_KEYDOWN = 0x0100;
+        private const uint WM_KEYUP   = 0x0101;
+        private const uint WM_CHAR    = 0x0102;
+
         private const int SW_HIDE = 0;
         private const int SW_SHOW = 5;
 
@@ -115,6 +122,27 @@ namespace DebugTools
                 }
                 catch { }
             }
+        }
+
+        /// <summary>
+        /// Post a raw Enter key press to the game window via the Windows message queue.
+        /// Works in WritingText mode where trigger injection does not.
+        /// </summary>
+        public static bool PostEnterKey()
+        {
+            var hwnd = _gameWindowHandle != IntPtr.Zero ? _gameWindowHandle : FindGameWindowHandle();
+            if (hwnd == IntPtr.Zero) return false;
+
+            const int VK_RETURN = 0x0D;
+            const int SCAN_RETURN = 0x1C;
+            IntPtr vk = new IntPtr(VK_RETURN);
+            IntPtr lParamDown = new IntPtr((SCAN_RETURN << 16) | 1);
+            IntPtr lParamUp   = new IntPtr((1 << 31) | (1 << 30) | (SCAN_RETURN << 16) | 1);
+
+            PostMessage(hwnd, WM_KEYDOWN, vk, lParamDown);
+            PostMessage(hwnd, WM_CHAR,    vk, lParamDown);
+            PostMessage(hwnd, WM_KEYUP,   vk, lParamUp);
+            return true;
         }
 
         private static IntPtr FindGameWindowHandle()

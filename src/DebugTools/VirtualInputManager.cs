@@ -292,11 +292,7 @@ namespace DebugTools
                 }
             }
 
-            // Clear scroll delta after one frame
-            if (_scrollDelta != 0)
-            {
-                _scrollDelta = 0;
-            }
+            // Scroll delta is now cleared in GetMouseState() after being consumed by InjectMouse
         }
 
         /// <summary>
@@ -322,8 +318,10 @@ namespace DebugTools
         /// </summary>
         public static (bool active, int x, int y, bool left, bool right, bool middle, int scroll) GetMouseState()
         {
+            int scroll = _scrollDelta;
+            _scrollDelta = 0; // Consume scroll delta after reading
             return (_mousePositionActive, _mouseX, _mouseY,
-                    _mouseLeftDown, _mouseRightDown, _mouseMiddleDown, _scrollDelta);
+                    _mouseLeftDown, _mouseRightDown, _mouseMiddleDown, scroll);
         }
 
         /// <summary>

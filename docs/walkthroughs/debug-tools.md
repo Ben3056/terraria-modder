@@ -1,6 +1,6 @@
 ---
 title: DebugTools Mod - HTTP Debug Server for Terraria 1.4.5
-description: Walkthrough of the DebugTools mod for Terraria 1.4.5. REST API, in-game console, virtual input injection, and window management for automated testing.
+description: Walkthrough of the DebugTools mod for Terraria 1.4.5. 70+ endpoint REST API, runtime introspection, in-game console, virtual input, inventory/world control, and headless operation.
 parent: Walkthroughs
 nav_order: 8
 ---
@@ -10,14 +10,20 @@ nav_order: 8
 **Difficulty:** Advanced
 **Concepts:** HTTP server, background threads, in-game console, virtual input, P/Invoke window management
 
-DebugTools is the most infrastructure-heavy mod in the framework. It provides an HTTP debug server, an in-game console, virtual input injection, and window management, enabling headless/remote game control.
+DebugTools is the most infrastructure-heavy mod in the framework. It provides a 70+ endpoint HTTP debug server, runtime introspection tools, an in-game console, virtual input injection, inventory/equipment/world control, and window management — enabling full headless/remote game control and automated testing.
 
 ## What It Does
 
-- **HTTP Debug Server**: REST API on `localhost:7878` exposing game state, input control, and menu navigation
+- **HTTP Debug Server**: REST API on `localhost:7878` with 70+ endpoints for game state queries, inventory/equipment control, world manipulation, NPC management, and runtime introspection
+- **Runtime Introspection**: Browse any type via reflection, read/write fields, evaluate property paths, trace method calls, and watch field changes — all at runtime via HTTP
 - **In-Game Console** (Ctrl+`): Command system with history, tab completion, and output scrolling
 - **Virtual Input**: Programmatic game actions (movement, attacks, inventory) via trigger injection
+- **Inventory & Equipment Control**: Set any inventory slot, equip armor/accessories/pets, select hotbar, modify chest contents
+- **World Manipulation**: Place/fill tiles and liquids, toggle hardmode/blood moon/events, set boss progression, trigger invasions, teleport
+- **NPC Control**: List, spawn, kill, and reposition NPCs
+- **Snapshots**: Save and restore game state for repeatable testing
 - **Window Management**: Hide/show game and console windows for headless operation
+- **System Health**: Mod health checks, Harmony patch audit, EventLog, FPS/memory diagnostics, network stats
 
 ## Architecture
 
@@ -25,26 +31,27 @@ DebugTools is a single mod that combines functionality from several subsystems. 
 
 ```
 Mod.Initialize()
-├── WindowManager.Initialize()     ← P/Invoke window handles
-├── DebugHttpServer.Start()        ← Background listener thread
-├── ConsoleUI.Initialize()         ← In-game console with Ctrl+` keybind
-├── VirtualInputManager.Init()     ← Trigger injection state
-└── VirtualInputPatches.Apply()    ← Harmony patches for input pipeline
+├── WindowManager.Initialize()       ← P/Invoke window handles
+├── DebugHttpServer.Start()          ← Background listener thread (70+ endpoints)
+├── RuntimeIntrospection.Init()      ← Reflection browser, tracing, watching
+├── MainThreadDispatcher.Init()      ← Thread-safe game-thread execution
+├── ConsoleUI.Initialize()           ← In-game console with Ctrl+` keybind
+├── VirtualInputManager.Init()       ← Trigger injection state
+└── VirtualInputPatches.Apply()      ← Harmony patches for input pipeline
 ```
 
 ## Key Concepts
 
 ### 1. Config-Driven Feature Toggles
 
-The mod's manifest defines three boolean config options:
+The mod uses a class-based config with three boolean options (saved to `core/configs/debug-tools.client.json`):
 
-```json
+```csharp
+public class DebugToolsConfig : ModConfig
 {
-  "config_schema": {
-    "enabled":     { "type": "bool", "default": true },
-    "httpServer":  { "type": "bool", "default": true },
-    "startHidden": { "type": "bool", "default": false }
-  }
+    [Client] public bool Enabled { get; set; } = true;
+    [Client] public bool HttpServer { get; set; } = true;
+    [Client] public bool StartHidden { get; set; } = false;
 }
 ```
 
@@ -110,7 +117,7 @@ private static void HandleRequest(HttpListenerContext ctx)
         case "/api/status":    HandleStatus(ctx); break;
         case "/api/player":    HandlePlayer(ctx); break;
         case "/api/input/key": HandleKeyInput(ctx); break;
-        // ... 25+ endpoints
+        // ... 70+ endpoints
     }
 }
 ```
@@ -236,10 +243,18 @@ The mod registers commands accessible via console or HTTP:
 
 | Category | Endpoints |
 |----------|-----------|
-| Status & Commands | `/api/status`, `/api/commands`, `/api/execute`, `/api/mods` |
-| Game State | `/api/player`, `/api/world`, `/api/state/surroundings`, `/api/state/inventory`, `/api/state/entities`, `/api/state/tiles`, `/api/state/ui` |
+| Status & System | `/api/status`, `/api/commands`, `/api/execute`, `/api/mods`, `/api/capabilities`, `/api/logs`, `/api/diagnostics`, `/api/health`, `/api/harmony`, `/api/net/stats` |
+| Game State (read) | `/api/player`, `/api/world`, `/api/state/surroundings`, `/api/state/inventory`, `/api/state/entities`, `/api/state/tiles`, `/api/state/tiles/raw`, `/api/state/ui`, `/api/npcs`, `/api/projectiles` |
+| Inventory & Equip | `/api/inventory/set`, `/api/equip`, `/api/hotbar/select`, `/api/chest/set` |
+| Player Actions | `/api/player/give`, `/api/teleport`, `/api/player/buff`, `/api/save` |
+| World & Tiles | `/api/tiles/set`, `/api/tiles/fill`, `/api/world/set`, `/api/progression/set`, `/api/event` |
+| NPC Control | `/api/npcs/kill`, `/api/npcs/set_position`, `/api/spawn/npc` |
+| Snapshots | `/api/snapshot/list`, `/api/snapshot/save`, `/api/snapshot/restore` |
 | Virtual Input | `/api/input/key`, `/api/input/mouse`, `/api/input/action`, `/api/input/release_all`, `/api/input/actions`, `/api/input/state`, `/api/input/log` |
-| Menu Navigation | `/api/menu/state`, `/api/menu/navigate`, `/api/menu/enter_world`, `/api/menu/wait` |
+| Menu Navigation | `/api/menu/state`, `/api/menu/navigate`, `/api/menu/enter_world`, `/api/menu/join_world`, `/api/menu/exit_world`, `/api/menu/wait` |
+| Mod Actions | `/api/mod-action`, `/api/keybind`, `/api/chat/send`, `/api/screenshot` |
+| Introspection | `/api/reflect/type`, `/api/reflect/field`, `/api/reflect/instance`, `/api/eval`, `/api/trace/add`, `/api/trace/remove`, `/api/trace/log`, `/api/watch/add`, `/api/watch/remove`, `/api/watch/log` |
+| Config | `/api/config`, `/api/config/{id}`, `/api/config/{id}/set`, `/api/config/{id}/reload`, `/api/config/{id}/reset` |
 | Window Control | `/api/window/show`, `/api/window/hide`, `/api/window/state` |
 
 ## Lessons Learned

@@ -1,147 +1,159 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Text;
-using System.Text.RegularExpressions;
+using System.Reflection;
 using TerrariaModder.Core.Logging;
 
 namespace TerrariaModder.Core.Config
 {
     /// <summary>
-    /// Config implementation for a mod.
+    /// Abstract base class for mod configuration.
+    /// Each mod defines a subclass with typed properties and attributes.
+    /// The framework reflects on the class to generate UI and serialise to JSON.
     /// </summary>
-    public class ModConfig : IModConfig, IDisposable
+    public abstract class ModConfig
     {
-        private readonly Dictionary<string, ConfigField> _schema;
-        private readonly Dictionary<string, object> _values;
-        private readonly object _valuesLock = new object(); // Guards _values against FileSystemWatcher thread
-        private readonly Dictionary<string, object> _baselineValues; // Snapshot at startup for restart-required tracking
-        private readonly ILogger _log;
-        private readonly string _modId;
-        private FileSystemWatcher _watcher;
-        private DateTime _lastWriteTime;
-        private bool _dirty;
+        /// <summary>
+        /// Config schema version. Declare in every subclass.
+        /// The framework stores this in the JSON and calls Migrate() when the file is behind.
+        /// </summary>
+        public abstract int Version { get; }
 
-        public string FilePath { get; }
-        public bool HasUnsavedChanges => _dirty;
-        public IReadOnlyDictionary<string, ConfigField> Schema => _schema;
+        // Set by ConfigManager before calling any framework methods.
+        public string FilePath { get; internal set; }
+        internal string ModId { get; set; }
+        internal ILogger Log { get; set; }
 
-        public event Action<string> OnValueChanged;
-        public event Action OnConfigReloaded;
+        // Baseline snapshot: property name -> boxed value captured after initial load.
+        // Used by HasChangesFromBaseline() and RestartRequired tracking.
+        private Dictionary<string, object> _baseline;
 
-        public ModConfig(string modId, string configPath, Dictionary<string, ConfigField> schema, ILogger logger)
+        // Cached property metadata (built once on first access).
+        private IReadOnlyList<ConfigPropertyMeta> _propertyMetadata;
+
+        /// <summary>
+        /// Override to handle migration from older config versions.
+        /// Called when the saved file's _version is less than Version.
+        /// </summary>
+        /// <param name="raw">Raw key-value pairs from the JSON file.</param>
+        /// <param name="fromVersion">The version stored in the file (0 if absent).</param>
+        protected virtual void Migrate(Dictionary<string, object> raw, int fromVersion) { }
+
+        /// <summary>Save current property values to disk.</summary>
+        public void Save() => ConfigManager.Save(this);
+
+        /// <summary>Reload property values from disk.</summary>
+        public void Reload() => ConfigManager.Reload(this);
+
+        /// <summary>Reset all properties to their declared default values.</summary>
+        public void ResetToDefaults() => ConfigManager.ResetToDefaults(this);
+
+        /// <summary>
+        /// True if any property value differs from its baseline (startup) value.
+        /// Used to detect if a restart-required field has changed.
+        /// </summary>
+        public bool HasChangesFromBaseline()
         {
-            _modId = modId;
-            FilePath = configPath;
-            _schema = schema ?? new Dictionary<string, ConfigField>();
-            _values = new Dictionary<string, object>();
-            _baselineValues = new Dictionary<string, object>();
-            _log = logger;
-
-            // Load or create config
-            LoadOrCreate();
-
-            // Snapshot baseline values for restart-required tracking
-            foreach (var kvp in _values)
+            if (_baseline == null) return false;
+            foreach (var meta in GetPropertyMetadata())
             {
-                _baselineValues[kvp.Key] = kvp.Value;
+                object current = meta.GetValue(this);
+                _baseline.TryGetValue(meta.Key, out object baseline);
+                if (!ValuesEqual(current, baseline)) return true;
             }
-
-            // Set up file watcher for hot reload
-            SetupFileWatcher();
+            return false;
         }
 
-        public T Get<T>(string key)
+        /// <summary>
+        /// True if any [RestartRequired] property differs from its baseline value.
+        /// </summary>
+        public bool HasRestartRequiredChanges()
         {
-            object value;
-            lock (_valuesLock)
+            if (_baseline == null) return false;
+            foreach (var meta in GetPropertyMetadata())
             {
-                if (!_values.TryGetValue(key, out value))
-                {
-                    if (_schema.TryGetValue(key, out var field))
-                        value = field.Default;
-                    else
-                        throw new KeyNotFoundException($"Config key not found: {key}");
-                }
+                if (!meta.RestartRequired) continue;
+                object current = meta.GetValue(this);
+                _baseline.TryGetValue(meta.Key, out object baseline);
+                if (!ValuesEqual(current, baseline)) return true;
             }
-
-            return ConvertValue<T>(value);
+            return false;
         }
 
-        public T Get<T>(string key, T defaultValue)
+        /// <summary>
+        /// Snapshot the current property values as the baseline.
+        /// Called by ConfigManager after initial load.
+        /// </summary>
+        internal void SnapshotBaseline()
         {
-            object value;
-            lock (_valuesLock)
+            _baseline = new Dictionary<string, object>();
+            foreach (var meta in GetPropertyMetadata())
             {
-                if (!_values.TryGetValue(key, out value))
-                {
-                    if (_schema.TryGetValue(key, out var field))
-                        value = field.Default;
-                    else
-                        return defaultValue;
-                }
-            }
-
-            try
-            {
-                return ConvertValue<T>(value);
-            }
-            catch (Exception ex)
-            {
-                _log.Warn($"[{_modId}] Config key '{key}': failed to convert value '{value}' to {typeof(T).Name}, using default. {ex.Message}");
-                return defaultValue;
-            }
-        }
-
-        public bool TryGet<T>(string key, out T value)
-        {
-            value = default;
-            try
-            {
-                value = Get<T>(key);
-                return true;
-            }
-            catch (KeyNotFoundException)
-            {
-                return false;
-            }
-            catch (Exception ex)
-            {
-                _log.Warn($"[{_modId}] Config key '{key}': failed to get as {typeof(T).Name}. {ex.Message}");
-                return false;
-            }
-        }
-
-        public bool HasKey(string key)
-        {
-            lock (_valuesLock)
-            {
-                return _values.ContainsKey(key) || _schema.ContainsKey(key);
+                _baseline[meta.Key] = meta.GetValue(this);
             }
         }
 
         /// <summary>
-        /// Check if any values have changed from the baseline (startup values).
-        /// Used to determine if restart is required for mods without hot reload.
+        /// Get cached metadata for all public settable config properties.
         /// </summary>
-        public bool HasChangesFromBaseline()
+        public IReadOnlyList<ConfigPropertyMeta> GetPropertyMetadata()
         {
-            lock (_valuesLock)
-            {
-                foreach (var kvp in _values)
-                {
-                    if (!_baselineValues.TryGetValue(kvp.Key, out var baseline))
-                    {
-                        return true; // New key added
-                    }
+            if (_propertyMetadata != null) return _propertyMetadata;
+            _propertyMetadata = BuildPropertyMetadata();
+            return _propertyMetadata;
+        }
 
-                    if (!ValuesEqual(kvp.Value, baseline))
-                    {
-                        return true;
-                    }
-                }
-                return false;
+        private IReadOnlyList<ConfigPropertyMeta> BuildPropertyMetadata()
+        {
+            var result = new List<ConfigPropertyMeta>();
+            var props = GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+            foreach (var prop in props)
+            {
+                // Skip non-settable and inherited framework properties
+                if (!prop.CanRead || !prop.CanWrite) continue;
+                if (prop.Name == nameof(Version)) continue;
+                if (prop.Name == nameof(FilePath)) continue;
+
+                // Only supported types
+                var t = prop.PropertyType;
+                if (t != typeof(bool) && t != typeof(int) && t != typeof(float) &&
+                    t != typeof(double) && t != typeof(string))
+                    continue;
+
+                var meta = new ConfigPropertyMeta
+                {
+                    Property = prop,
+                    Label = prop.GetCustomAttribute<LabelAttribute>()?.Text ?? prop.Name,
+                    Description = prop.GetCustomAttribute<DescriptionAttribute>()?.Text ?? "",
+                    RestartRequired = prop.GetCustomAttribute<RestartRequiredAttribute>() != null,
+                    Min = prop.GetCustomAttribute<RangeAttribute>()?.Min,
+                    Max = prop.GetCustomAttribute<RangeAttribute>()?.Max,
+                    Options = prop.GetCustomAttribute<OptionsAttribute>()?.Values
+                };
+
+                // Scope: explicit [Server] or [Client]; untagged defaults to Client
+                if (prop.GetCustomAttribute<ServerAttribute>() != null)
+                    meta.Scope = ConfigScope.Server;
+                else
+                    meta.Scope = ConfigScope.Client;
+
+                // FormerlySerializedAs — collect all
+                var formerAttrs = prop.GetCustomAttributes<FormerlySerializedAsAttribute>();
+                var formerNames = new List<string>();
+                foreach (var attr in formerAttrs)
+                    formerNames.Add(attr.OldName);
+                meta.FormerNames = formerNames.ToArray();
+
+                result.Add(meta);
             }
+
+            return result.AsReadOnly();
+        }
+
+        // Called by ConfigManager to apply migrated raw values.
+        internal void ApplyMigration(Dictionary<string, object> raw, int fromVersion)
+        {
+            Migrate(raw, fromVersion);
         }
 
         private static bool ValuesEqual(object a, object b)
@@ -149,353 +161,19 @@ namespace TerrariaModder.Core.Config
             if (a == null && b == null) return true;
             if (a == null || b == null) return false;
 
-            // Handle boolean comparisons (could be stored as different types)
-            if (a is bool ba && b is bool bb)
-                return ba == bb;
+            if (a is bool ba && b is bool bb) return ba == bb;
+            if (a is string sa && b is string sb) return sa == sb;
 
-            // Handle numeric comparisons (int/double/float can be mixed)
-            if (IsNumeric(a) && IsNumeric(b))
+            // Numeric comparison with tolerance
+            try
             {
-                try
-                {
-                    double da = Convert.ToDouble(a);
-                    double db = Convert.ToDouble(b);
-                    return Math.Abs(da - db) < 0.0001;
-                }
-                catch (InvalidCastException) { }
-                catch (OverflowException) { }
+                double da = Convert.ToDouble(a);
+                double db = Convert.ToDouble(b);
+                return Math.Abs(da - db) < 0.0001;
             }
-
-            // String comparison
-            if (a is string sa && b is string sb)
-                return sa == sb;
+            catch { }
 
             return Equals(a, b);
-        }
-
-        private static bool IsNumeric(object o)
-        {
-            return o is int || o is long || o is float || o is double || o is decimal;
-        }
-
-        public void Set<T>(string key, T value)
-        {
-            object boxed = value;
-
-            // Validate and clamp if schema exists
-            if (_schema.TryGetValue(key, out var field))
-            {
-                boxed = field.Clamp(boxed);
-            }
-
-            bool changed;
-            lock (_valuesLock)
-            {
-                var oldValue = _values.ContainsKey(key) ? _values[key] : null;
-                _values[key] = boxed;
-                changed = !Equals(oldValue, boxed);
-                if (changed) _dirty = true;
-            }
-
-            // Fire event outside lock to prevent deadlocks
-            if (changed)
-            {
-                OnValueChanged?.Invoke(key);
-            }
-        }
-
-        public void Save()
-        {
-            try
-            {
-                string content;
-                lock (_valuesLock)
-                {
-                    var sb = new StringBuilder();
-                    sb.AppendLine("{");
-
-                    int count = 0;
-                    foreach (var kvp in _values)
-                    {
-                        count++;
-                        string valueStr = SerializeValue(kvp.Value);
-                        string comma = count < _values.Count ? "," : "";
-                        sb.AppendLine($"  \"{kvp.Key}\": {valueStr}{comma}");
-                    }
-
-                    sb.AppendLine("}");
-                    content = sb.ToString();
-                    _dirty = false;
-                }
-
-                // File I/O outside lock
-                var dir = Path.GetDirectoryName(FilePath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                File.WriteAllText(FilePath, content);
-                _lastWriteTime = File.GetLastWriteTime(FilePath);
-
-                _log.Debug($"[{_modId}] Config saved: {FilePath}");
-            }
-            catch (Exception ex)
-            {
-                _log.Error($"[{_modId}] Failed to save config '{FilePath}': {ex.Message}");
-            }
-        }
-
-        public void Reload()
-        {
-            try
-            {
-                if (File.Exists(FilePath))
-                {
-                    string json = File.ReadAllText(FilePath);
-                    lock (_valuesLock)
-                    {
-                        ParseJson(json);
-                        _lastWriteTime = File.GetLastWriteTime(FilePath);
-                        _dirty = false;
-                    }
-                    _log.Debug($"[{_modId}] Config reloaded from {FilePath}");
-                    OnConfigReloaded?.Invoke();
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.Error($"[{_modId}] Failed to reload config '{FilePath}': {ex.Message}");
-            }
-        }
-
-        public void ResetToDefaults()
-        {
-            lock (_valuesLock)
-            {
-                _values.Clear();
-                foreach (var kvp in _schema)
-                {
-                    _values[kvp.Key] = kvp.Value.Default;
-                }
-                _dirty = true;
-            }
-        }
-
-        private void LoadOrCreate()
-        {
-            // Initialize with defaults from schema
-            foreach (var kvp in _schema)
-            {
-                _values[kvp.Key] = kvp.Value.Default;
-            }
-
-            if (File.Exists(FilePath))
-            {
-                try
-                {
-                    string json = File.ReadAllText(FilePath);
-                    ParseJson(json);
-                    _lastWriteTime = File.GetLastWriteTime(FilePath);
-                    _log.Debug($"[{_modId}] Config loaded from {FilePath} with {_values.Count} values");
-                }
-                catch (Exception ex)
-                {
-                    _log.Warn($"[{_modId}] Failed to load config '{FilePath}', using defaults: {ex.Message}");
-                }
-            }
-            else
-            {
-                // Create default config file
-                _log.Info($"[{_modId}] Creating default config file: {FilePath}");
-                Save();
-            }
-        }
-
-        private void ParseJson(string json)
-        {
-            // Simple JSON parser for flat config objects
-            // Use lookahead (?=...) instead of non-capturing group (?:...) to avoid consuming the next key's quote
-            var pattern = @"""(\w+)""\s*:\s*(.+?)(?=,\s*""|,?\s*\})";
-            var matches = Regex.Matches(json, pattern, RegexOptions.Singleline);
-
-            _log.Debug($"ParseJson found {matches.Count} matches");
-
-            foreach (Match match in matches)
-            {
-                string key = match.Groups[1].Value;
-                string valueStr = match.Groups[2].Value.Trim();
-
-                object value = DeserializeValue(valueStr, key);
-                if (value != null)
-                {
-                    // Validate against schema
-                    if (_schema.TryGetValue(key, out var field))
-                    {
-                        if (!field.Validate(value, out string error))
-                        {
-                            _log.Warn($"Config [{key}]: {error}, using default");
-                            value = field.Default;
-                        }
-                        else
-                        {
-                            value = field.Clamp(value);
-                        }
-                    }
-
-                    _log.Debug($"Config parsed: {key} = {value}");
-                    _values[key] = value;
-                }
-            }
-        }
-
-        private object DeserializeValue(string valueStr, string key)
-        {
-            // Remove trailing commas
-            valueStr = valueStr.TrimEnd(',').Trim();
-
-            // Determine type from schema if available
-            ConfigFieldType type = ConfigFieldType.String;
-            if (_schema.TryGetValue(key, out var field))
-                type = field.Type;
-
-            // Boolean
-            if (valueStr == "true") return true;
-            if (valueStr == "false") return false;
-
-            // String (quoted)
-            if (valueStr.StartsWith("\"") && valueStr.EndsWith("\""))
-            {
-                return valueStr.Substring(1, valueStr.Length - 2)
-                    .Replace("\\\"", "\"")
-                    .Replace("\\\\", "\\");
-            }
-
-            // Number
-            if (type == ConfigFieldType.Int && int.TryParse(valueStr, out int intVal))
-                return intVal;
-
-            if (double.TryParse(valueStr, out double numVal))
-            {
-                if (type == ConfigFieldType.Int)
-                    return (int)numVal;
-                return numVal;
-            }
-
-            return valueStr;
-        }
-
-        private string SerializeValue(object value)
-        {
-            if (value == null) return "null";
-            if (value is bool b) return b ? "true" : "false";
-            if (value is int i) return i.ToString();
-            if (value is double d) return d.ToString("0.######");
-            if (value is float f) return f.ToString("0.######");
-            if (value is string s) return $"\"{EscapeString(s)}\"";
-            return $"\"{EscapeString(value.ToString())}\"";
-        }
-
-        private string EscapeString(string s)
-        {
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
-        }
-
-        private T ConvertValue<T>(object value)
-        {
-            if (value == null) return default;
-            if (value is T typed) return typed;
-
-            var targetType = typeof(T);
-
-            // Handle numeric conversions
-            if (targetType == typeof(int))
-            {
-                if (value is double d) return (T)(object)(int)d;
-                if (value is long l) return (T)(object)(int)l;
-                if (int.TryParse(value.ToString(), out int i)) return (T)(object)i;
-            }
-            if (targetType == typeof(float))
-            {
-                if (value is double d) return (T)(object)(float)d;
-                if (float.TryParse(value.ToString(), out float f)) return (T)(object)f;
-            }
-            if (targetType == typeof(double))
-            {
-                if (double.TryParse(value.ToString(), out double d)) return (T)(object)d;
-            }
-            if (targetType == typeof(bool))
-            {
-                if (bool.TryParse(value.ToString(), out bool b)) return (T)(object)b;
-            }
-            if (targetType == typeof(string))
-            {
-                return (T)(object)value.ToString();
-            }
-
-            return (T)Convert.ChangeType(value, targetType);
-        }
-
-        private void SetupFileWatcher()
-        {
-            try
-            {
-                var dir = Path.GetDirectoryName(FilePath);
-                var file = Path.GetFileName(FilePath);
-
-                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
-                    return;
-
-                var watcher = new FileSystemWatcher(dir, file);
-                try
-                {
-                    watcher.NotifyFilter = NotifyFilters.LastWrite;
-                    watcher.Changed += OnFileChanged;
-                    watcher.EnableRaisingEvents = true;
-                    _watcher = watcher;
-                }
-                catch
-                {
-                    watcher.Dispose();
-                    throw;
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.Debug($"[{_modId}] Could not set up config file watcher for '{FilePath}': {ex.Message}");
-            }
-        }
-
-        private void OnFileChanged(object sender, FileSystemEventArgs e)
-        {
-            try
-            {
-                if (!File.Exists(FilePath)) return;
-
-                // Debounce - check if file was actually modified
-                var writeTime = File.GetLastWriteTime(FilePath);
-                if (writeTime <= _lastWriteTime) return;
-
-                // Don't reload if we just saved
-                if (_dirty) return;
-
-                _log.Info($"[{_modId}] Config file changed externally, reloading: {FilePath}");
-                Reload();
-            }
-            catch (Exception ex)
-            {
-                _log.Error($"[{_modId}] Error handling config file change for '{FilePath}': {ex.Message}");
-            }
-        }
-
-        public void Dispose()
-        {
-            var watcher = _watcher;
-            if (watcher != null)
-            {
-                _watcher = null;
-                watcher.EnableRaisingEvents = false;
-                watcher.Changed -= OnFileChanged;
-                watcher.Dispose();
-            }
         }
     }
 }

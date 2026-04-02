@@ -7,6 +7,8 @@ using TerrariaModder.Core.Conflicts;
 using TerrariaModder.Core.Input;
 using TerrariaModder.Core.Logging;
 using TerrariaModder.Core.Manifest;
+using TerrariaModder.Core.Net;
+using TerrariaModder.Core.Permissions;
 using TerrariaModder.Core.Reflection;
 using TerrariaModder.Core.UI.Widgets;
 
@@ -71,6 +73,9 @@ namespace TerrariaModder.Core.UI
         private static ConflictReport _conflictReport;
         private static bool _conflictScanDone;
 
+        // Config tab inner sub-tab: 0=Client, 1=Server
+        private static int _configInnerTab = 0;
+
         // Load order drag state
         private static bool _isDraggingLoadOrder;
         private static int _dragLoadOrderIndex = -1;
@@ -88,8 +93,12 @@ namespace TerrariaModder.Core.UI
         private const int ButtonWidth = 80;
         private const int ButtonHeight = 22;
 
-        // Tabs
-        private static readonly string[] Tabs = { "Mods", "Config", "Keybinds", "Load Order", "Logs" };
+        // Tabs — Players tab added dynamically when admin is connected in multiplayer
+        private static readonly string[] TabsBase = { "Mods", "Config", "Keybinds", "Load Order", "Logs" };
+        private static readonly string[] TabsWithPlayers = { "Mods", "Config", "Keybinds", "Load Order", "Logs", "Players" };
+
+        private static string[] GetVisibleTabs()
+            => (Game.IsMultiplayer && NetSync.LocalPlayerIsAdmin) ? TabsWithPlayers : TabsBase;
 
         public static bool IsVisible => _visible;
 
@@ -287,8 +296,10 @@ namespace TerrariaModder.Core.UI
 
             // Draw tabs
             int tabY = menuY + 40;
-            int tabWidth = (MenuWidth - Padding * 2) / Tabs.Length;
-            for (int i = 0; i < Tabs.Length; i++)
+            var tabs = GetVisibleTabs();
+            if (_selectedTab >= tabs.Length) _selectedTab = 0;
+            int tabWidth = (MenuWidth - Padding * 2) / tabs.Length;
+            for (int i = 0; i < tabs.Length; i++)
             {
                 int tabX = menuX + Padding + i * tabWidth;
                 bool isActive = i == _selectedTab;
@@ -296,7 +307,7 @@ namespace TerrariaModder.Core.UI
 
                 var tabColor = isActive ? UIColors.ItemActiveBg : (isHover ? UIColors.ItemHoverBg : UIColors.SectionBg);
                 UIRenderer.DrawRect(tabX, tabY, tabWidth - 2, TabHeight, tabColor);
-                string tabLabel = TextUtil.Truncate(Tabs[i], tabWidth - 12);
+                string tabLabel = TextUtil.Truncate(tabs[i], tabWidth - 12);
                 int tabTextW = TextUtil.MeasureWidth(tabLabel);
                 UIRenderer.DrawTextShadow(tabLabel, tabX + (tabWidth - tabTextW) / 2, tabY + 7, UIColors.Text);
 
@@ -322,6 +333,7 @@ namespace TerrariaModder.Core.UI
                 case 2: DrawKeybindsTab(menuX + Padding, contentY, MenuWidth - Padding * 2, contentHeight); break;
                 case 3: DrawConflictsTab(menuX + Padding, contentY, MenuWidth - Padding * 2, contentHeight); break;
                 case 4: DrawLogsTab(menuX + Padding, contentY, MenuWidth - Padding * 2, contentHeight); break;
+                case 5: DrawPlayersTab(menuX + Padding, contentY, MenuWidth - Padding * 2, contentHeight); break;
             }
 
             // Handle scrollbar drag (before wheel handling)
@@ -499,8 +511,12 @@ namespace TerrariaModder.Core.UI
                 var selectedMod = mods.FirstOrDefault(m => m.Manifest.Id == _selectedModId);
                 if (selectedMod != null)
                 {
-                    int detailY = y + height - 80;
-                    UIRenderer.DrawRect(x, detailY, width, 75, UIColors.HeaderBg);
+                    // Check if this mod has keybinds — expand detail panel if so
+                    var modKeybinds = KeybindManager.GetKeybindsForMod(selectedMod.Manifest.Id).ToList();
+                    bool hasKeybind = modKeybinds.Count > 0;
+                    int detailHeight = hasKeybind ? 90 : 75;
+                    int detailY = y + height - detailHeight;
+                    UIRenderer.DrawRect(x, detailY, width, detailHeight, UIColors.HeaderBg);
 
                     UIRenderer.DrawTextShadow(selectedMod.Manifest.Name, x + 5, detailY + 5, UIColors.Text);
                     UIRenderer.DrawText("by " + selectedMod.Manifest.Author, x + 5, detailY + 22, UIColors.TextDim);
@@ -515,37 +531,56 @@ namespace TerrariaModder.Core.UI
 
                     string desc = TextUtil.Truncate(selectedMod.Manifest.Description ?? "", width - 10);
                     UIRenderer.DrawText(desc, x + 5, detailY + 55, UIColors.TextDim);
+
+                    if (hasKeybind)
+                    {
+                        var kb = modKeybinds[0];
+                        string keybindText = "Keybind: " + kb.CurrentKey + " (" + kb.Label + ")";
+                        UIRenderer.DrawText(keybindText, x + 5, detailY + 72, UIColors.TextDim);
+                    }
                 }
             }
         }
 
         private static void DrawConfigTab(int x, int y, int width, int height)
         {
-            // Header
-            UIRenderer.DrawTextShadow("Configuration (all mods)", x, y, UIColors.Text);
-            y += 25;
+            // Inner sub-tabs: Client | Server
+            int tabBtnW = 70;
+            int tabBtnH = 22;
+            DrawConfigInnerTab("Client", 0, x, y, tabBtnW, tabBtnH);
+            DrawConfigInnerTab("Server", 1, x + tabBtnW + 4, y, tabBtnW, tabBtnH);
+            y += tabBtnH + 6;
 
-            int listHeight = height - 25;
+            int listHeight = height - tabBtnH - 6;
             int visibleItems = listHeight / ItemHeight;
             int scrollIndicatorWidth = 10;
             int contentWidth = width - scrollIndicatorWidth;
 
-            // Get all mods with config
-            var modsWithConfig = PluginLoader.Mods.Where(m => m.Context?.Config?.Schema != null && m.Context.Config.Schema.Count > 0).ToList();
+            var scope = _configInnerTab == 0 ? Config.ConfigScope.Client : Config.ConfigScope.Server;
 
-            // Build flat list of display items: Framework section first, then mod configs
+            // Get mods with at least one property matching the active scope
+            var modsWithConfig = PluginLoader.Mods
+                .Where(m => m.Context?.Config != null &&
+                            m.Context.Config.GetPropertyMetadata().Any(p => p.Scope == scope))
+                .ToList();
+
+            // Build flat display list
             var displayItems = new List<(string type, object data, ModInfo mod)>();
 
-            // Framework settings section (theme selector)
-            displayItems.Add(("header", "Framework", null));
-            displayItems.Add(("theme", null, null));
+            // Framework theme selector appears in Client tab only
+            if (_configInnerTab == 0)
+            {
+                displayItems.Add(("header", "Framework", null));
+                displayItems.Add(("theme", null, null));
+            }
 
             foreach (var mod in modsWithConfig)
             {
                 displayItems.Add(("header", mod.Manifest.Name, mod));
-                foreach (var field in mod.Context.Config.Schema.Values)
+                foreach (var meta in mod.Context.Config.GetPropertyMetadata())
                 {
-                    displayItems.Add(("field", field, mod));
+                    if (meta.Scope == scope)
+                        displayItems.Add(("property", meta, mod));
                 }
             }
 
@@ -563,29 +598,24 @@ namespace TerrariaModder.Core.UI
 
                 if (item.type == "header")
                 {
-                    // Draw section header for mod (or Framework)
                     string modName = (string)item.data;
-                    bool supportsHotReload = item.mod != null && ModSupportsHotReload(item.mod);
 
-                    // Check if this mod has pending config changes that require restart
+                    // Check if this mod has pending restart-required changes
                     bool needsRestart = false;
-                    if (item.mod != null && !supportsHotReload)
+                    if (item.mod != null)
                     {
-                        var config = item.mod.Context?.Config as ModConfig;
-                        needsRestart = config?.HasChangesFromBaseline() ?? false;
+                        needsRestart = item.mod.Context?.Config?.HasRestartRequiredChanges() ?? false;
                     }
 
                     int headerHeight = ItemHeight - 4;
-
                     UIRenderer.DrawRect(x, currentY, contentWidth, headerHeight, UIColors.SectionBg);
-                    // Divider line at top
                     UIRenderer.DrawRect(x, currentY, contentWidth, 2, UIColors.Divider);
                     UIRenderer.DrawTextShadow(modName, x + 8, currentY + 5, UIColors.Warning);
 
                     if (needsRestart)
                     {
                         int restartTagX = x + 8 + TextUtil.MeasureWidth(modName) + 5;
-                        UIRenderer.DrawText("(Game Restart Required)", restartTagX, currentY + 5, UIColors.Error);
+                        UIRenderer.DrawText("(Restart Required)", restartTagX, currentY + 5, UIColors.Error);
                     }
 
                     // Per-mod Reset button (only for actual mods, not Framework)
@@ -606,26 +636,41 @@ namespace TerrariaModder.Core.UI
                         }
                     }
 
-                    currentY += headerHeight + 4; // Add spacing after header
+                    currentY += headerHeight + 4;
                 }
                 else if (item.type == "theme")
                 {
-                    // Framework theme selector
                     DrawThemeSelector(x, currentY, contentWidth);
                     currentY += ItemHeight;
                 }
-                else if (item.type == "field")
+                else if (item.type == "property")
                 {
-                    var field = (ConfigField)item.data;
+                    var meta = (Config.ConfigPropertyMeta)item.data;
                     var config = item.mod.Context.Config;
-                    DrawConfigField(x, currentY, contentWidth, field, config, item.mod.Manifest.Id);
+                    DrawConfigProperty(x, currentY, contentWidth, meta, config, item.mod.Manifest.Id);
                     currentY += ItemHeight;
                 }
             }
 
-            // Draw scroll indicator
             DrawScrollIndicator(x + contentWidth + 2, y, listHeight, _scrollOffset, totalDisplayItems, visibleItems);
+        }
 
+        private static void DrawConfigInnerTab(string label, int index, int x, int y, int w, int h)
+        {
+            bool isActive = _configInnerTab == index;
+            bool hover = UIRenderer.IsMouseOver(x, y, w, h) && !_blockInput;
+            var bg = isActive ? UIColors.SectionBg : (hover ? UIColors.ButtonHover : UIColors.Button);
+            UIRenderer.DrawRect(x, y, w, h, bg);
+            if (isActive)
+                UIRenderer.DrawRect(x, y + h - 2, w, 2, UIColors.Warning);
+            int textX = x + Math.Max(0, (w - TextUtil.MeasureWidth(label)) / 2);
+            UIRenderer.DrawText(label, textX, y + 4, isActive ? UIColors.Text : UIColors.TextDim);
+            if (!isActive && hover && UIRenderer.MouseLeftClick)
+            {
+                _configInnerTab = index;
+                _scrollOffset = 0;
+                UIRenderer.ConsumeClick();
+            }
         }
 
         /// <summary>
@@ -685,58 +730,88 @@ namespace TerrariaModder.Core.UI
             }
         }
 
-        private static void DrawConfigField(int x, int y, int width, ConfigField field, IModConfig config, string modId)
+        private static void DrawConfigProperty(int x, int y, int width, Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId)
         {
             bool isHover = UIRenderer.IsMouseOver(x, y, width, ItemHeight - 2) && !_blockInput;
             UIRenderer.DrawRect(x, y, width, ItemHeight - 2, isHover ? UIColors.ItemHoverBg : UIColors.ItemBg);
 
-            // Field label (truncated to available space before value area)
-            string label = TextUtil.Truncate(field.Label ?? field.Key, width - 190);
+            string label = TextUtil.Truncate(meta.Label, width - 190);
             UIRenderer.DrawTextShadow(label, x + 5, y + 5, UIColors.Text);
 
-            if (isHover && !string.IsNullOrEmpty(field.Description))
-                Tooltip.Set(field.Description);
+            if (isHover && !string.IsNullOrEmpty(meta.Description))
+                Tooltip.Set(meta.Description);
 
-            // Value area
             int valueX = x + width - 180;
             int valueWidth = 170;
-            object currentValue = config.Get<object>(field.Key);
+            object currentValue = meta.GetValue(config);
+            var t = meta.PropertyType;
 
-            switch (field.Type)
+            // Multiplayer client: [Server] fields are read-only (server-authoritative)
+            bool isServerField = meta.Scope == Config.ConfigScope.Server;
+            bool isClient = Game.IsClient;
+
+            if (isServerField && isClient)
             {
-                case ConfigFieldType.Bool:
-                    DrawBoolField(valueX, y, currentValue, field, config, modId);
-                    // Whole row clickable for bools
-                    if (isHover && UIRenderer.MouseLeftClick && !_isEditingNumber && !_isEditingConfigKey && !_isRebinding)
-                    {
-                        bool bv = currentValue is bool bb && bb;
-                        config.Set(field.Key, !bv);
-                        AutoSaveConfig(modId);
-                        UIRenderer.ConsumeClick();
-                    }
-                    break;
-                case ConfigFieldType.Int:
-                    DrawIntField(valueX, y, valueWidth, currentValue, field, config, modId);
-                    break;
-                case ConfigFieldType.Float:
-                    DrawFloatField(valueX, y, valueWidth, currentValue, field, config, modId);
-                    break;
-                case ConfigFieldType.Enum:
-                    DrawEnumField(valueX, y, valueWidth, currentValue, field, config, modId);
-                    break;
-                case ConfigFieldType.Key:
-                    DrawKeyField(valueX, y, valueWidth, currentValue, field, config, modId);
-                    break;
-                default:
-                    // Read-only display for unsupported types (String, etc)
-                    string valueStr = TextUtil.Truncate(currentValue?.ToString() ?? "null", valueWidth - 10);
-                    UIRenderer.DrawRect(valueX, y + 2, valueWidth, ItemHeight - 6, UIColors.InputBg);
-                    UIRenderer.DrawText(valueStr, valueX + 5, y + 5, UIColors.TextDim);
-                    break;
+                DrawServerLockedField(valueX, y, valueWidth, currentValue, isHover);
+                return;
+            }
+
+            // [Server] + [RestartRequired] fields: locked mid-session when multiplayer is active
+            // (too dangerous to change while clients are connected — would desync immediately)
+            if (isServerField && meta.RestartRequired && Game.IsMultiplayer)
+            {
+                if (isHover)
+                    Tooltip.Set("This [Server] value requires restart and cannot be changed while multiplayer is active.");
+                DrawServerLockedField(valueX, y, valueWidth, currentValue, isHover);
+                return;
+            }
+
+            if (t == typeof(bool))
+            {
+                DrawBoolField(valueX, y, currentValue, meta, config, modId);
+                if (isHover && UIRenderer.MouseLeftClick && !_isEditingNumber && !_isEditingConfigKey && !_isRebinding)
+                {
+                    bool bv = currentValue is bool bb && bb;
+                    meta.SetValue(config, !bv);
+                    AutoSaveConfig(modId, meta, config);
+                    UIRenderer.ConsumeClick();
+                }
+            }
+            else if (t == typeof(int))
+            {
+                DrawIntField(valueX, y, valueWidth, currentValue, meta, config, modId);
+            }
+            else if (t == typeof(float) || t == typeof(double))
+            {
+                DrawFloatField(valueX, y, valueWidth, currentValue, meta, config, modId);
+            }
+            else if (t == typeof(string) && meta.Options != null && meta.Options.Length > 0)
+            {
+                DrawEnumField(valueX, y, valueWidth, currentValue, meta, config, modId);
+            }
+            else
+            {
+                // Read-only display for unsupported types
+                string valueStr = TextUtil.Truncate(currentValue?.ToString() ?? "null", valueWidth - 10);
+                UIRenderer.DrawRect(valueX, y + 2, valueWidth, ItemHeight - 6, UIColors.InputBg);
+                UIRenderer.DrawText(valueStr, valueX + 5, y + 5, UIColors.TextDim);
             }
         }
 
-        private static void DrawBoolField(int x, int y, object value, ConfigField field, IModConfig config, string modId)
+        /// <summary>
+        /// Draw a locked read-only indicator for [Server] config fields on multiplayer clients.
+        /// </summary>
+        private static void DrawServerLockedField(int x, int y, int width, object value, bool isHover)
+        {
+            UIRenderer.DrawRect(x, y + 2, width, ItemHeight - 6, UIColors.InputBg);
+            string valStr = TextUtil.Truncate(value?.ToString() ?? "null", width - 60);
+            UIRenderer.DrawText(valStr, x + 5, y + 5, UIColors.TextDim);
+            UIRenderer.DrawText("[Server]", x + width - 52, y + 5, UIColors.Warning);
+            if (isHover)
+                Tooltip.Set("This value is controlled by the server and cannot be changed here.");
+        }
+
+        private static void DrawBoolField(int x, int y, object value, Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId)
         {
             bool boolVal = value is bool b && b;
             int boxSize = 18;
@@ -751,12 +826,12 @@ namespace TerrariaModder.Core.UI
             UIRenderer.DrawText(boolVal ? "On" : "Off", x + boxSize + 8, y + 5, boolVal ? UIColors.Success : UIColors.TextDim);
         }
 
-        private static void DrawIntField(int x, int y, int width, object value, ConfigField field, IModConfig config, string modId)
+        private static void DrawIntField(int x, int y, int width, object value, Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId)
         {
-            int intVal = value is int i ? i : 0;
+            int intVal = value is int i ? i : (value != null ? Convert.ToInt32(value) : 0);
             int btnWidth = 25;
-            bool isEditing = _isEditingNumber && _editingNumberField == field.Key && _editingNumberModId == modId;
-            string fieldId = $"{modId}.{field.Key}";
+            bool isEditing = _isEditingNumber && _editingNumberField == meta.Key && _editingNumberModId == modId;
+            string fieldId = $"{modId}.{meta.Key}";
 
             // Minus button
             bool minusHover = UIRenderer.IsMouseOver(x, y + 2, btnWidth, ItemHeight - 6) && !isEditing && !_blockInput;
@@ -776,7 +851,7 @@ namespace TerrariaModder.Core.UI
                     _lastRepeatTime = DateTime.Now;
 
                     // Immediate first click
-                    AdjustIntValue(field, config, modId, intVal, -1);
+                    AdjustIntValue(meta, config, modId, intVal, -1);
                     UIRenderer.ConsumeClick();
                 }
             }
@@ -788,27 +863,23 @@ namespace TerrariaModder.Core.UI
 
             if (isEditing)
             {
-                // Draw editing state
                 UIRenderer.DrawRect(valX, y + 2, valWidth, ItemHeight - 6, UIColors.Warning.WithAlpha(180));
-                string displayText = _editingNumberText + "_"; // Show cursor
+                string displayText = _editingNumberText + "_";
                 UIRenderer.DrawText(displayText, valX + 5, y + 5, UIColors.Text);
 
-                // Handle text input
                 UIRenderer.EnableTextInput();
-                HandleNumberInput(field, config, modId, false);
+                HandleNumberInput(meta, config, modId, false);
             }
             else
             {
-                // Draw normal display (left-aligned to match editing)
                 UIRenderer.DrawRect(valX, y + 2, valWidth, ItemHeight - 6, valHover ? UIColors.InputFocusBg : UIColors.InputBg);
                 string valStr = intVal.ToString();
                 UIRenderer.DrawText(valStr, valX + 5, y + 5, UIColors.Text);
 
-                // Click to edit
                 if (valHover && UIRenderer.MouseLeftClick)
                 {
                     _isEditingNumber = true;
-                    _editingNumberField = field.Key;
+                    _editingNumberField = meta.Key;
                     _editingNumberModId = modId;
                     _editingNumberText = intVal.ToString();
                     _editingNumberFirstKeyPressed = false;
@@ -822,41 +893,37 @@ namespace TerrariaModder.Core.UI
             UIRenderer.DrawRect(plusX, y + 2, btnWidth, ItemHeight - 6, plusHover ? UIColors.ButtonHover : UIColors.Button);
             UIRenderer.DrawText("+", plusX + 8, y + 4, UIColors.Text);
 
-            // Handle plus button click and hold
             if (plusHover && UIRenderer.MouseLeft && !isEditing)
             {
                 if (UIRenderer.MouseLeftClick)
                 {
-                    // Start hold tracking
                     _holdingButtonField = fieldId;
                     _holdingButtonModId = modId;
                     _holdingButtonDirection = 1;
                     _holdStartTime = DateTime.Now;
                     _lastRepeatTime = DateTime.Now;
 
-                    // Immediate first click
-                    AdjustIntValue(field, config, modId, intVal, 1);
+                    AdjustIntValue(meta, config, modId, intVal, 1);
                     UIRenderer.ConsumeClick();
                 }
             }
         }
 
-        private static void AdjustIntValue(ConfigField field, IModConfig config, string modId, int currentVal, int direction)
+        private static void AdjustIntValue(Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId, int currentVal, int direction)
         {
-            int step = field.Step > 0 ? (int)field.Step : 1;
-            int newVal = currentVal + (step * direction);
-            if (field.Min.HasValue && newVal < field.Min.Value) newVal = (int)field.Min.Value;
-            if (field.Max.HasValue && newVal > field.Max.Value) newVal = (int)field.Max.Value;
-            config.Set(field.Key, newVal);
-            AutoSaveConfig(modId);
+            int newVal = currentVal + direction;
+            if (meta.Min.HasValue && newVal < meta.Min.Value) newVal = (int)meta.Min.Value;
+            if (meta.Max.HasValue && newVal > meta.Max.Value) newVal = (int)meta.Max.Value;
+            meta.SetValue(config, newVal);
+            AutoSaveConfig(modId, meta, config);
         }
 
-        private static void DrawFloatField(int x, int y, int width, object value, ConfigField field, IModConfig config, string modId)
+        private static void DrawFloatField(int x, int y, int width, object value, Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId)
         {
             float floatVal = value is float f ? f : (value is double d ? (float)d : 0f);
             int btnWidth = 25;
-            bool isEditing = _isEditingNumber && _editingNumberField == field.Key && _editingNumberModId == modId;
-            string fieldId = $"{modId}.{field.Key}";
+            bool isEditing = _isEditingNumber && _editingNumberField == meta.Key && _editingNumberModId == modId;
+            string fieldId = $"{modId}.{meta.Key}";
 
             // Minus button
             bool minusHover = UIRenderer.IsMouseOver(x, y + 2, btnWidth, ItemHeight - 6) && !isEditing && !_blockInput;
@@ -874,7 +941,7 @@ namespace TerrariaModder.Core.UI
                     _holdStartTime = DateTime.Now;
                     _lastRepeatTime = DateTime.Now;
 
-                    AdjustFloatValue(field, config, modId, floatVal, -1);
+                    AdjustFloatValue(meta, config, modId, floatVal, -1);
                     UIRenderer.ConsumeClick();
                 }
             }
@@ -887,15 +954,14 @@ namespace TerrariaModder.Core.UI
             if (isEditing)
             {
                 UIRenderer.DrawRect(valX, y + 2, valWidth, ItemHeight - 6, UIColors.Warning.WithAlpha(180));
-                string displayText = _editingNumberText + "_"; // Show cursor
+                string displayText = _editingNumberText + "_";
                 UIRenderer.DrawText(displayText, valX + 5, y + 5, UIColors.Text);
 
                 UIRenderer.EnableTextInput();
-                HandleNumberInput(field, config, modId, true);
+                HandleNumberInput(meta, config, modId, true);
             }
             else
             {
-                // Draw normal display (left-aligned to match editing)
                 UIRenderer.DrawRect(valX, y + 2, valWidth, ItemHeight - 6, valHover ? UIColors.InputFocusBg : UIColors.InputBg);
                 string valStr = floatVal.ToString("F2");
                 UIRenderer.DrawText(valStr, valX + 5, y + 5, UIColors.Text);
@@ -903,7 +969,7 @@ namespace TerrariaModder.Core.UI
                 if (valHover && UIRenderer.MouseLeftClick)
                 {
                     _isEditingNumber = true;
-                    _editingNumberField = field.Key;
+                    _editingNumberField = meta.Key;
                     _editingNumberModId = modId;
                     _editingNumberText = floatVal.ToString("F2");
                     _editingNumberFirstKeyPressed = false;
@@ -927,26 +993,25 @@ namespace TerrariaModder.Core.UI
                     _holdStartTime = DateTime.Now;
                     _lastRepeatTime = DateTime.Now;
 
-                    AdjustFloatValue(field, config, modId, floatVal, 1);
+                    AdjustFloatValue(meta, config, modId, floatVal, 1);
                     UIRenderer.ConsumeClick();
                 }
             }
         }
 
-        private static void AdjustFloatValue(ConfigField field, IModConfig config, string modId, float currentVal, int direction)
+        private static void AdjustFloatValue(Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId, float currentVal, int direction)
         {
-            float step = field.Step > 0 ? (float)field.Step : 0.1f;
-            float newVal = currentVal + (step * direction);
-            if (field.Min.HasValue && newVal < field.Min.Value) newVal = (float)field.Min.Value;
-            if (field.Max.HasValue && newVal > field.Max.Value) newVal = (float)field.Max.Value;
-            config.Set(field.Key, newVal);
-            AutoSaveConfig(modId);
+            float newVal = currentVal + (0.1f * direction);
+            if (meta.Min.HasValue && newVal < (float)meta.Min.Value) newVal = (float)meta.Min.Value;
+            if (meta.Max.HasValue && newVal > (float)meta.Max.Value) newVal = (float)meta.Max.Value;
+            meta.SetValue(config, newVal);
+            AutoSaveConfig(modId, meta, config);
         }
 
-        private static void DrawEnumField(int x, int y, int width, object value, ConfigField field, IModConfig config, string modId)
+        private static void DrawEnumField(int x, int y, int width, object value, Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId)
         {
             string currentVal = value?.ToString() ?? "";
-            var options = field.Options ?? new List<string>();
+            var options = meta.Options != null ? new List<string>(meta.Options) : new List<string>();
             int currentIndex = options.IndexOf(currentVal);
             if (currentIndex < 0) currentIndex = 0;
 
@@ -960,8 +1025,8 @@ namespace TerrariaModder.Core.UI
             if (leftHover && UIRenderer.MouseLeftClick && options.Count > 0)
             {
                 currentIndex = (currentIndex - 1 + options.Count) % options.Count;
-                config.Set(field.Key, options[currentIndex]);
-                AutoSaveConfig(modId);
+                meta.SetValue(config, options[currentIndex]);
+                AutoSaveConfig(modId, meta, config);
                 UIRenderer.ConsumeClick();
             }
 
@@ -981,71 +1046,9 @@ namespace TerrariaModder.Core.UI
             if (rightHover && UIRenderer.MouseLeftClick && options.Count > 0)
             {
                 currentIndex = (currentIndex + 1) % options.Count;
-                config.Set(field.Key, options[currentIndex]);
-                AutoSaveConfig(modId);
+                meta.SetValue(config, options[currentIndex]);
+                AutoSaveConfig(modId, meta, config);
                 UIRenderer.ConsumeClick();
-            }
-        }
-
-        private static void DrawKeyField(int x, int y, int width, object value, ConfigField field, IModConfig config, string modId)
-        {
-            string currentKey = value?.ToString() ?? "";
-            bool isEditing = _isEditingConfigKey && _editingConfigKeyField == field.Key && _editingConfigKeyModId == modId;
-
-            bool hover = UIRenderer.IsMouseOver(x, y + 2, width, ItemHeight - 6) && !_isEditingConfigKey && !_isRebinding && !_blockInput;
-            var bgColor = isEditing ? UIColors.Warning.WithAlpha(180) : (hover ? UIColors.ButtonHover : UIColors.HeaderBg);
-            UIRenderer.DrawRect(x, y + 2, width, ItemHeight - 6, bgColor);
-
-            string displayText = isEditing ? "Press a key..." : currentKey;
-            UIRenderer.DrawText(displayText, x + 10, y + 5, isEditing ? UIColors.Text : UIColors.Success);
-
-            if (hover && UIRenderer.MouseLeftClick)
-            {
-                _isEditingConfigKey = true;
-                _editingConfigKeyField = field.Key;
-                _editingConfigKeyModId = modId;
-                UIRenderer.RegisterKeyInputBlock("mod-menu"); // Set immediately for Update phase blocking
-                UIRenderer.ConsumeClick();
-            }
-
-            // Handle key capture when editing this field
-            if (isEditing)
-            {
-                UIRenderer.EnableTextInput();
-
-                for (int keyCode = 1; keyCode < 256; keyCode++)
-                {
-                    if (keyCode == KeyCode.Escape)
-                    {
-                        if (InputState.IsKeyJustPressed(KeyCode.Escape))
-                        {
-                            _isEditingConfigKey = false;
-                            _editingConfigKeyField = null;
-                            _editingConfigKeyModId = null;
-                            UIRenderer.DisableTextInput();
-                        }
-                        continue;
-                    }
-
-                    // Skip modifier keys alone
-                    if (keyCode == KeyCode.LeftControl || keyCode == KeyCode.RightControl ||
-                        keyCode == KeyCode.LeftShift || keyCode == KeyCode.RightShift ||
-                        keyCode == KeyCode.LeftAlt || keyCode == KeyCode.RightAlt)
-                        continue;
-
-                    if (InputState.IsKeyJustPressed(keyCode))
-                    {
-                        string keyName = KeyCode.GetName(keyCode);
-                        config.Set(field.Key, keyName);
-                        AutoSaveConfig(modId);
-                        _isEditingConfigKey = false;
-                        _editingConfigKeyField = null;
-                        _editingConfigKeyModId = null;
-                        UIRenderer.DisableTextInput();
-                        _log?.Info($"[UI] Config key {field.Key} set to {keyName}");
-                        return;
-                    }
-                }
             }
         }
 
@@ -1378,9 +1381,25 @@ namespace TerrariaModder.Core.UI
                         break;
 
                     case ConflictItemType.PatchConflictHeader:
-                        var sevColor = UIColors.Error;
+                        string sevLabel;
+                        Color4 sevColor;
+                        switch (item.Severity)
+                        {
+                            case ConflictSeverity.High:
+                                sevLabel = "! HIGH";
+                                sevColor = UIColors.Error;
+                                break;
+                            case ConflictSeverity.Medium:
+                                sevLabel = "~ MED";
+                                sevColor = UIColors.Warning;
+                                break;
+                            default:
+                                sevLabel = "  LOW";
+                                sevColor = UIColors.TextDim;
+                                break;
+                        }
                         UIRenderer.DrawRect(x, currentY, contentWidth, ItemHeight - 2, UIColors.ItemBg);
-                        UIRenderer.DrawText("! HIGH", x + 5, currentY + 5, sevColor);
+                        UIRenderer.DrawText(sevLabel, x + 5, currentY + 5, sevColor);
                         UIRenderer.DrawTextShadow(item.Label, x + 60, currentY + 5, UIColors.Text);
                         currentY += ItemHeight;
                         break;
@@ -1778,6 +1797,77 @@ namespace TerrariaModder.Core.UI
             }
         }
 
+        private static void DrawPlayersTab(int x, int y, int width, int height)
+        {
+            // Header row
+            UIRenderer.DrawTextShadow("Connected Players", x, y, UIColors.Text);
+
+            y += 30;
+
+            var players = NetSync.PlayerList;
+            if (players.Count == 0)
+            {
+                UIRenderer.DrawText("No player data — connects trigger automatic updates", x, y, UIColors.TextDim);
+                return;
+            }
+
+            int rowHeight = 34;
+            int visibleRows = (height - 30) / rowHeight;
+            int maxScroll = Math.Max(0, players.Count - visibleRows);
+            _scrollOffset = Math.Min(_scrollOffset, maxScroll);
+
+            for (int i = 0; i < visibleRows && i + _scrollOffset < players.Count; i++)
+            {
+                var (slot, name, guid, role) = players[i + _scrollOffset];
+                int rowY = y + i * rowHeight;
+
+                bool isAdmin = role == PermissionService.PlayerRole.Admin;
+                bool isSelf = slot == Game.MyPlayerIndex;
+
+                // Row background
+                UIRenderer.DrawRect(x, rowY, width, rowHeight - 2, UIColors.ItemBg);
+
+                // Player name
+                UIRenderer.DrawTextShadow(name + (isSelf ? " (you)" : ""), x + 6, rowY + 8, UIColors.Text);
+
+                // Role badge
+                string roleLabel = isAdmin ? "Admin" : "Player";
+                var roleColor = isAdmin ? UIColors.Warning : UIColors.TextDim;
+                UIRenderer.DrawTextShadow(roleLabel, x + 180, rowY + 8, roleColor);
+
+                // Action buttons (not for self)
+                if (!isSelf)
+                {
+                    int btnX = x + width - 155;
+
+                    // Promote / Demote
+                    string opLabel = isAdmin ? "Demote" : "Promote";
+                    bool opHover = UIRenderer.IsMouseOver(btnX, rowY + 5, 70, ButtonHeight) && !_blockInput;
+                    UIRenderer.DrawRect(btnX, rowY + 5, 70, ButtonHeight, opHover ? UIColors.ItemHoverBg : UIColors.SectionBg);
+                    UIRenderer.DrawTextSmall(opLabel, btnX + 6, rowY + 8, UIColors.Text);
+                    if (opHover && UIRenderer.MouseLeftClick)
+                    {
+                        string cmd = isAdmin ? "deop" : "op";
+                        NetSync.SendServerCommandRequest(cmd, name);
+                        UIRenderer.ConsumeClick();
+                    }
+
+                    // Kick
+                    int kickX = btnX + 76;
+                    bool kickHover = UIRenderer.IsMouseOver(kickX, rowY + 5, 50, ButtonHeight) && !_blockInput;
+                    UIRenderer.DrawRect(kickX, rowY + 5, 50, ButtonHeight, kickHover ? UIColors.Error.WithAlpha(200) : UIColors.SectionBg);
+                    UIRenderer.DrawTextSmall("Kick", kickX + 8, rowY + 8, kickHover ? UIColors.Text : UIColors.TextDim);
+                    if (kickHover && UIRenderer.MouseLeftClick)
+                    {
+                        NetSync.SendServerCommandRequest("kick", name);
+                        UIRenderer.ConsumeClick();
+                    }
+                }
+            }
+
+            DrawScrollIndicator(x + width - 8, y, height - 30, _scrollOffset, players.Count, visibleRows);
+        }
+
         #region Helper Methods
 
         /// <summary>
@@ -1873,7 +1963,7 @@ namespace TerrariaModder.Core.UI
         /// <summary>
         /// Save config immediately and notify mod if it supports hot reload.
         /// </summary>
-        private static void AutoSaveConfig(string modId)
+        private static void AutoSaveConfig(string modId, Config.ConfigPropertyMeta changedMeta = null, Config.ModConfig changedConfig = null)
         {
             try
             {
@@ -1885,6 +1975,17 @@ namespace TerrariaModder.Core.UI
                     if (ModSupportsHotReload(mod))
                     {
                         CallOnConfigChanged(mod);
+                    }
+
+                    // Server in multiplayer: broadcast [Server] field changes to all clients
+                    // Game.IsServer only checks dedServ env var — also need to handle H&P host
+                    bool isHostAndPlay = false;
+                    try { isHostAndPlay = Terraria.Netplay.IsHostAndPlay; } catch { }
+                    if (changedMeta != null && changedConfig != null &&
+                        changedMeta.Scope == Config.ConfigScope.Server &&
+                        Game.IsMultiplayer && (Game.IsServer || isHostAndPlay))
+                    {
+                        NetSync.BroadcastConfigChange(modId, changedMeta, changedConfig);
                     }
                 }
             }
@@ -1938,22 +2039,24 @@ namespace TerrariaModder.Core.UI
                     fieldKey = fieldKey.Substring(_holdingButtonModId.Length + 1);
                 }
 
-                if (!mod.Context.Config.Schema.TryGetValue(fieldKey, out var field))
+                var meta = mod.Context.Config.GetPropertyMetadata()
+                    .FirstOrDefault(m => m.Key == fieldKey);
+                if (meta == null)
                 {
                     _holdingButtonField = null;
                     return;
                 }
 
                 // Adjust the value
-                if (field.Type == ConfigFieldType.Int)
+                if (meta.PropertyType == typeof(int))
                 {
-                    int currentVal = mod.Context.Config.Get<int>(fieldKey);
-                    AdjustIntValue(field, mod.Context.Config, _holdingButtonModId, currentVal, _holdingButtonDirection);
+                    int currentVal = Convert.ToInt32(meta.GetValue(mod.Context.Config) ?? 0);
+                    AdjustIntValue(meta, mod.Context.Config, _holdingButtonModId, currentVal, _holdingButtonDirection);
                 }
-                else if (field.Type == ConfigFieldType.Float)
+                else if (meta.PropertyType == typeof(float) || meta.PropertyType == typeof(double))
                 {
-                    float currentVal = mod.Context.Config.Get<float>(fieldKey);
-                    AdjustFloatValue(field, mod.Context.Config, _holdingButtonModId, currentVal, _holdingButtonDirection);
+                    float currentVal = Convert.ToSingle(meta.GetValue(mod.Context.Config) ?? 0f);
+                    AdjustFloatValue(meta, mod.Context.Config, _holdingButtonModId, currentVal, _holdingButtonDirection);
                 }
             }
             catch (Exception ex)
@@ -1969,12 +2072,12 @@ namespace TerrariaModder.Core.UI
         /// <summary>
         /// Handle number input for editing number fields.
         /// </summary>
-        private static void HandleNumberInput(ConfigField field, IModConfig config, string modId, bool isFloat)
+        private static void HandleNumberInput(Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId, bool isFloat)
         {
             // Check for Enter to confirm
             if (InputState.IsKeyJustPressed(KeyCode.Enter) || InputState.IsKeyJustPressed(KeyCode.NumPadEnter))
             {
-                ApplyNumberEdit(field, config, modId, isFloat);
+                ApplyNumberEdit(meta, config, modId, isFloat);
                 return;
             }
 
@@ -2049,33 +2152,33 @@ namespace TerrariaModder.Core.UI
             // Click outside to confirm
             if (UIRenderer.MouseLeftClick)
             {
-                ApplyNumberEdit(field, config, modId, isFloat);
+                ApplyNumberEdit(meta, config, modId, isFloat);
             }
         }
 
         /// <summary>
         /// Apply the edited number value.
         /// </summary>
-        private static void ApplyNumberEdit(ConfigField field, IModConfig config, string modId, bool isFloat)
+        private static void ApplyNumberEdit(Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId, bool isFloat)
         {
             if (isFloat)
             {
                 if (float.TryParse(_editingNumberText, out float newVal))
                 {
-                    if (field.Min.HasValue && newVal < field.Min.Value) newVal = (float)field.Min.Value;
-                    if (field.Max.HasValue && newVal > field.Max.Value) newVal = (float)field.Max.Value;
-                    config.Set(field.Key, newVal);
-                    AutoSaveConfig(modId);
+                    if (meta.Min.HasValue && newVal < (float)meta.Min.Value) newVal = (float)meta.Min.Value;
+                    if (meta.Max.HasValue && newVal > (float)meta.Max.Value) newVal = (float)meta.Max.Value;
+                    meta.SetValue(config, newVal);
+                    AutoSaveConfig(modId, meta, config);
                 }
             }
             else
             {
                 if (int.TryParse(_editingNumberText, out int newVal))
                 {
-                    if (field.Min.HasValue && newVal < field.Min.Value) newVal = (int)field.Min.Value;
-                    if (field.Max.HasValue && newVal > field.Max.Value) newVal = (int)field.Max.Value;
-                    config.Set(field.Key, newVal);
-                    AutoSaveConfig(modId);
+                    if (meta.Min.HasValue && newVal < (int)meta.Min.Value) newVal = (int)meta.Min.Value;
+                    if (meta.Max.HasValue && newVal > (int)meta.Max.Value) newVal = (int)meta.Max.Value;
+                    meta.SetValue(config, newVal);
+                    AutoSaveConfig(modId, meta, config);
                 }
             }
 
@@ -2092,17 +2195,28 @@ namespace TerrariaModder.Core.UI
             try
             {
                 var config = mod.Context.Config;
-                var schema = config.Schema;
+                config.ResetToDefaults();
+                config.Save();
 
-                foreach (var field in schema.Values)
+                if (ModSupportsHotReload(mod))
                 {
-                    if (field.Default != null)
+                    CallOnConfigChanged(mod);
+                }
+
+                // Broadcast all [Server] properties in multiplayer
+                bool isHostAndPlay = false;
+                try { isHostAndPlay = Terraria.Netplay.IsHostAndPlay; } catch { }
+                if (Game.IsMultiplayer && (Game.IsServer || isHostAndPlay))
+                {
+                    foreach (var meta in config.GetPropertyMetadata())
                     {
-                        config.Set(field.Key, field.Default);
+                        if (meta.Scope == Config.ConfigScope.Server)
+                        {
+                            NetSync.BroadcastConfigChange(mod.Manifest.Id, meta, config);
+                        }
                     }
                 }
 
-                AutoSaveConfig(mod.Manifest.Id);
                 _log?.Info($"[UI] Reset config to defaults for {mod.Manifest.Id}");
             }
             catch (Exception ex)

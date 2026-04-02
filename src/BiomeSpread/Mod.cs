@@ -8,7 +8,7 @@ using TerrariaModder.Core.Logging;
 
 namespace BiomeSpread
 {
-    public class Mod : IMod
+    public class Mod : IMod, IModLifecycle
     {
         public string Id => "biome-spread";
         public string Name => "Biome Spread Control";
@@ -18,6 +18,7 @@ namespace BiomeSpread
         private static ModContext _context;
         private static Harmony _harmony;
         private static Timer _patchTimer;
+        private static BiomeSpreadConfig _config;
 
         // Config
         internal static bool Enabled = true;
@@ -27,6 +28,7 @@ namespace BiomeSpread
         {
             _context = context;
             _log = context.Logger;
+            _config = context.GetConfig<BiomeSpreadConfig>();
 
             LoadConfig();
 
@@ -73,8 +75,9 @@ namespace BiomeSpread
 
         private void LoadConfig()
         {
-            Enabled = _context.Config.Get("enabled", true);
-            DisableSpread = _context.Config.Get("disableSpread", true);
+            if (_config == null) return;
+            Enabled = _config.Enabled;
+            DisableSpread = _config.DisableSpread;
         }
 
         public void OnConfigChanged()
@@ -83,12 +86,17 @@ namespace BiomeSpread
             _log.Info($"Config reloaded - Enabled: {Enabled}, DisableSpread: {DisableSpread}");
         }
 
+        public void OnContentReady(ModContext context) { }
+
         public void OnWorldLoad()
         {
             _log.Info($"World loaded - spread {(Enabled && DisableSpread ? "DISABLED" : "enabled")}");
         }
 
-        public void OnWorldUnload() { }
+        public void OnWorldUnload()
+        {
+            try { Terraria.WorldGen.AllowedToSpreadInfections = true; } catch { }
+        }
 
         public void Unload()
         {

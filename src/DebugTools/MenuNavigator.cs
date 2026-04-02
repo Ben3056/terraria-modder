@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using Terraria;
 using Terraria.IO;
@@ -134,7 +135,10 @@ namespace DebugTools
                         if (target == "play")
                             return PlaySelectedWorld();
 
-                        return NavigationResult.Fail($"Unknown navigation target: {target}. Use: singleplayer, character_N, world_N, play, back, title");
+                        if (target == "submit")
+                            return SubmitTextPrompt();
+
+                        return NavigationResult.Fail($"Unknown navigation target: {target}. Use: singleplayer, character_N, world_N, play, back, title, submit");
                 }
             }
             finally
@@ -146,17 +150,50 @@ namespace DebugTools
         /// <summary>
         /// Full sequence: enter a world from any state. Handles current state detection.
         /// </summary>
-        public NavigationResult EnterWorld(int characterIndex = 0, int worldIndex = 0, int timeoutMs = 30000)
+        public NavigationResult EnterWorld(int characterIndex = 0, int worldIndex = 0, int timeoutMs = 30000, bool multiplayer = false)
         {
             // Clamp timeout to prevent indefinite blocking
             if (timeoutMs <= 0) timeoutMs = 30000;
             if (timeoutMs > MaxTimeoutMs) timeoutMs = MaxTimeoutMs;
 
-            // Already in world?
+            // Already in world — save and quit to title, then re-enter
             if (!Main.gameMenu)
             {
-                string currentWorld = Main.worldName ?? "";
-                return NavigationResult.Ok($"Already in world: {currentWorld}");
+                _log.Info("[MenuNavigator] EnterWorld: already in world, calling WorldGen.SaveAndQuit...");
+                try
+                {
+                    WorldGen.SaveAndQuit();
+                }
+                catch (Exception ex)
+                {
+                    _log.Warn($"[MenuNavigator] SaveAndQuit threw: {ex.Message}");
+                }
+
+                // Wait up to 15s for gameMenu to become true (world saved + title screen shown)
+                var exitSw = Stopwatch.StartNew();
+                while (!Main.gameMenu && exitSw.ElapsedMilliseconds < 15000)
+                    Thread.Sleep(100);
+
+                if (!Main.gameMenu)
+                    return NavigationResult.Fail("Timed out waiting for world exit after SaveAndQuit");
+
+                // Brief pause for title screen to stabilize
+                Thread.Sleep(500);
+                _log.Info("[MenuNavigator] EnterWorld: world exited, proceeding to enter world");
+            }
+
+            // Wait for splash screen to complete — Initialize_AlmostEverything() is called only when
+            // showSplash transitions to false. Until then, Main.player[1-254] are null and
+            // playWorldCallBack will NRE on its first loop.
+            if (Main.showSplash)
+            {
+                _log.Info("[MenuNavigator] EnterWorld: waiting for splash screen (Initialize_AlmostEverything not yet called)...");
+                var splashSw = Stopwatch.StartNew();
+                while (Main.showSplash && splashSw.ElapsedMilliseconds < 30000)
+                    Thread.Sleep(200);
+                if (Main.showSplash)
+                    return NavigationResult.Fail("Timed out waiting for splash screen to complete (game not fully initialized)");
+                _log.Info("[MenuNavigator] EnterWorld: splash complete, player array initialized");
             }
 
             // Prevent concurrent navigation operations from corrupting game state
@@ -165,7 +202,7 @@ namespace DebugTools
 
             try
             {
-                return EnterWorldInternal(characterIndex, worldIndex, timeoutMs);
+                return EnterWorldInternal(characterIndex, worldIndex, timeoutMs, multiplayer);
             }
             finally
             {
@@ -173,9 +210,92 @@ namespace DebugTools
             }
         }
 
-        private NavigationResult EnterWorldInternal(int characterIndex, int worldIndex, int timeoutMs)
+        /// <summary>
+        /// Join a running server via IP. Handles SaveAndQuit if already in a world.
+        /// </summary>
+        public NavigationResult JoinWorld(string ip = "127.0.0.1", int characterIndex = 0, int timeoutMs = 30000)
         {
-            _log.Info($"[MenuNavigator] EnterWorld: character={characterIndex}, world={worldIndex}, timeout={timeoutMs}ms");
+            if (timeoutMs <= 0) timeoutMs = 30000;
+            if (timeoutMs > MaxTimeoutMs) timeoutMs = MaxTimeoutMs;
+
+            // Already in world — save and quit first
+            if (!Main.gameMenu)
+            {
+                _log.Info("[MenuNavigator] JoinWorld: already in world, calling SaveAndQuit...");
+                try { WorldGen.SaveAndQuit(); } catch (Exception ex) { _log.Warn($"[MenuNavigator] SaveAndQuit threw: {ex.Message}"); }
+                var exitSw = Stopwatch.StartNew();
+                while (!Main.gameMenu && exitSw.ElapsedMilliseconds < 15000) Thread.Sleep(100);
+                if (!Main.gameMenu) return NavigationResult.Fail("Timed out waiting for world exit");
+                Thread.Sleep(500);
+            }
+
+            if (!Monitor.TryEnter(_navigationLock))
+                return NavigationResult.Fail("Another navigation operation is already in progress");
+
+            try { return JoinWorldInternal(ip, characterIndex, timeoutMs); }
+            finally { Monitor.Exit(_navigationLock); }
+        }
+
+        private NavigationResult JoinWorldInternal(string ip, int characterIndex, int timeoutMs)
+        {
+            _log.Info($"[MenuNavigator] JoinWorld: ip={ip}, character={characterIndex}, timeout={timeoutMs}ms");
+
+            try { Main.LoadPlayers(); }
+            catch (Exception ex) { return NavigationResult.Fail($"JoinWorld: LoadPlayers failed: {ex.Message}"); }
+
+            if (Main.PlayerList == null || Main.PlayerList.Count == 0)
+                return NavigationResult.Fail("JoinWorld: no characters available");
+            if (characterIndex < 0 || characterIndex >= Main.PlayerList.Count)
+                return NavigationResult.Fail($"JoinWorld: character index {characterIndex} out of range");
+
+            var playerData = Main.PlayerList[characterIndex];
+            if (playerData.Player == null || playerData.Player.loadStatus != 0)
+                return NavigationResult.Fail($"JoinWorld: character at index {characterIndex} failed to load");
+
+            _log.Info($"[MenuNavigator] JoinWorld: selecting character '{playerData.Player.name}', connecting to {ip}");
+
+            // Bypass SelectPlayer (UI-thread-dependent) — set state directly, same approach as H&P flow.
+            // This avoids fancy-UI (menuMode=888) main-loop interference when called from HTTP thread.
+            Main.myPlayer = 0;
+            Main.ServerSideCharacter = false;
+            Main.ClearPendingPlayerSelectCallbacks();
+            try { playerData.SetAsActive(); }
+            catch (Exception ex) { return NavigationResult.Fail($"JoinWorld: SetAsActive failed: {ex.Message}"); }
+
+            // Set IP and start TCP connection
+            if (!Netplay.SetRemoteIP(ip))
+                return NavigationResult.Fail($"JoinWorld: SetRemoteIP failed for '{ip}'");
+
+            Main.menuMultiplayer = true;
+            Main.autoJoin = false; // we're handling it manually
+            Netplay.StartTcpClient();
+            Main.menuMode = 10; // loading/connecting screen
+
+            _log.Info($"[MenuNavigator] JoinWorld: TCP connect started (menuMode=10), waiting up to {timeoutMs}ms for world...");
+
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                if (!Main.gameMenu && Main.LocalPlayer != null)
+                {
+                    _log.Info($"[MenuNavigator] JoinWorld: entered world '{Main.worldName}' in {sw.ElapsedMilliseconds}ms");
+                    return NavigationResult.Ok($"Joined world: {Main.worldName}", Main.worldName);
+                }
+                if (Main.menuMode == 200 || Main.menuMode == 201)
+                    return NavigationResult.Fail($"JoinWorld: connection failed (menuMode={Main.menuMode})");
+                Thread.Sleep(100);
+            }
+
+            Main.autoJoin = false;
+            return NavigationResult.Fail($"JoinWorld: timed out after {timeoutMs}ms waiting for world");
+        }
+
+        private NavigationResult EnterWorldInternal(int characterIndex, int worldIndex, int timeoutMs, bool multiplayer = false)
+        {
+            _log.Info($"[MenuNavigator] EnterWorld: character={characterIndex}, world={worldIndex}, timeout={timeoutMs}ms, multiplayer={multiplayer}");
+
+            if (multiplayer)
+                return EnterWorldInternalHnP(characterIndex, worldIndex, timeoutMs);
 
             // Step 1: Load players and select character
             try
@@ -204,10 +324,10 @@ namespace DebugTools
             if (loadStatus != 0) // StatusID.Ok == 0
                 return NavigationResult.Fail($"Character '{characterName}' failed to load (loadStatus={loadStatus}). File may be corrupt or from a newer version.");
 
-            _log.Info($"[MenuNavigator] Selecting character: {characterName} (index {characterIndex})");
+            _log.Info($"[MenuNavigator] Selecting character: {characterName} (index {characterIndex}, multiplayer={multiplayer})");
 
-            // Ensure singleplayer path - SelectPlayer checks this flag
-            Main.menuMultiplayer = false;
+            // Set multiplayer flag before SelectPlayer — controls whether H&P or singleplayer path is used
+            Main.menuMultiplayer = multiplayer;
 
             try
             {
@@ -346,6 +466,137 @@ namespace DebugTools
             return NavigationResult.Fail($"Timeout waiting for {condition} after {timeoutMs}ms (menuMode={Main.menuMode}, gameMenu={Main.gameMenu})");
         }
 
+        /// <summary>
+        /// H&amp;P flow via direct API calls — same approach as singleplayer (no mouse clicks).
+        /// Mirrors what AutoHost() + SelectPlayer() + HostAndPlay() do internally.
+        /// </summary>
+        private NavigationResult EnterWorldInternalHnP(int characterIndex, int worldIndex, int timeoutMs)
+        {
+            _log.Info($"[MenuNavigator] H&P flow: char={characterIndex}, world={worldIndex}, timeout={timeoutMs}ms");
+            var total = Stopwatch.StartNew();
+
+            // Kill any stale TerrariaServer.exe from previous sessions — it may be holding port 7777
+            try
+            {
+                var stale = Process.GetProcessesByName("TerrariaServer");
+                foreach (var p in stale)
+                {
+                    _log.Info($"[MenuNavigator] H&P: killing stale TerrariaServer.exe (pid={p.Id})");
+                    try { p.Kill(); p.WaitForExit(3000); } catch { }
+                }
+                if (stale.Length > 0) Thread.Sleep(500); // brief wait for port release
+            }
+            catch (Exception ex) { _log.Warn($"[MenuNavigator] H&P: error killing stale server: {ex.Message}"); }
+
+            // Step 1: Load players
+            try { Main.LoadPlayers(); }
+            catch (Exception ex) { return NavigationResult.Fail($"H&P: LoadPlayers failed: {ex.Message}"); }
+
+            if (Main.PlayerList == null || Main.PlayerList.Count == 0)
+                return NavigationResult.Fail("H&P: no characters available");
+            if (characterIndex < 0 || characterIndex >= Main.PlayerList.Count)
+                return NavigationResult.Fail($"H&P: character index {characterIndex} out of range (0-{Main.PlayerList.Count - 1})");
+
+            var playerData = Main.PlayerList[characterIndex];
+            if (playerData.Player == null || playerData.Player.loadStatus != 0)
+                return NavigationResult.Fail($"H&P: character at index {characterIndex} failed to load (status={playerData.Player?.loadStatus})");
+
+            // Step 2: Manual equivalent of SelectPlayer for H&P (mirrors QuickLoad approach):
+            // Set myPlayer=0, SetAsActive, LoadWorlds — without menuMultiplayer/menuServer side effects.
+            Main.myPlayer = 0;
+            Main.ServerSideCharacter = false;
+            _log.Info($"[MenuNavigator] H&P: selecting character '{playerData.Player.name}' (loadStatus={playerData.Player.loadStatus})");
+            try { playerData.SetAsActive(); }
+            catch (Exception ex) { return NavigationResult.Fail($"H&P: SetAsActive(player) failed: {ex.Message}"); }
+            _log.Info($"[MenuNavigator] H&P: player[0].name='{Main.player[0]?.name}' ActivePlayer='{Main.ActivePlayerFileData?.Player?.name}'");
+
+            try { Main.LoadWorlds(); }
+            catch (Exception ex) { return NavigationResult.Fail($"H&P: LoadWorlds failed: {ex.Message}"); }
+
+            // Step 3: Select world
+            if (Main.WorldList == null || Main.WorldList.Count == 0)
+                return NavigationResult.Fail("H&P: no worlds available");
+            if (worldIndex < 0 || worldIndex >= Main.WorldList.Count)
+                return NavigationResult.Fail($"H&P: world index {worldIndex} out of range (0-{Main.WorldList.Count - 1})");
+
+            var worldData = Main.WorldList[worldIndex];
+            _log.Info($"[MenuNavigator] H&P: selecting world '{worldData.Name}'");
+            try { worldData.SetAsActive(); }
+            catch (Exception ex) { return NavigationResult.Fail($"H&P: SetAsActive(world) failed: {ex.Message}"); }
+
+            // Step 4: Trigger HostAndPlay() via the game's own Update loop (main thread safe).
+            // Mode 30 (password prompt) calls HostAndPlay() when autoPass=true.
+            Netplay.ServerPassword = "";
+            string worldPath = Main.ActiveWorldFileData?.Path ?? "(null)";
+            bool worldFileExists = System.IO.File.Exists(worldPath);
+            _log.Info($"[MenuNavigator] H&P: world path='{worldPath}' exists={worldFileExists} isCloud={Main.ActiveWorldFileData?.IsCloudSave}");
+            if (!worldFileExists && Main.ActiveWorldFileData?.IsCloudSave == false)
+                return NavigationResult.Fail($"H&P: world file not found: '{worldPath}'");
+            // Note: libPath is no longer cleared. The HostAndPlay_Prefix patch in EventPatches
+            // replaces the server spawn to use TerrariaInjector.exe directly, so -loadlib is never used.
+            Main.autoPass = true;
+            Main.menuMode = 30;
+            _log.Info($"[MenuNavigator] H&P: set menuMode=30 + autoPass=true (player[0]='{Main.player[0]?.name}')");
+
+            // Step 5: Wait for world to load
+            int remaining = Math.Max(15000, (int)(timeoutMs - total.ElapsedMilliseconds));
+            _log.Info($"[MenuNavigator] H&P: waiting for world load (up to {remaining}ms)");
+            var loadSw = Stopwatch.StartNew();
+            int lastMode = -1;
+            string expectedPlayerName = playerData.Player.name;
+            while (loadSw.ElapsedMilliseconds < remaining)
+            {
+                if (!Main.gameMenu && Main.LocalPlayer != null)
+                {
+                    _log.Info($"[MenuNavigator] H&P: entered world '{Main.worldName}' in {total.ElapsedMilliseconds}ms");
+                    return NavigationResult.Ok($"Entered multiplayer world: {Main.worldName}", Main.worldName);
+                }
+                int m = Main.menuMode;
+                if (m != lastMode)
+                {
+                    string pname = Main.player[Main.myPlayer]?.name ?? "(null)";
+                    _log.Info($"[MenuNavigator] H&P: mode={m} myPlayer={Main.myPlayer} playerName='{pname}'");
+                    // Disconnect/kick detection: went from connecting/loading back to title or menu
+                    if (m == 0 && lastMode >= 10)
+                        return NavigationResult.Fail($"H&P: disconnected (kicked or connection lost, was mode {lastMode})");
+                    lastMode = m;
+                }
+                if (m == 200) return NavigationResult.Fail("H&P: world load failed (corrupt, backup available)");
+                if (m == 201) return NavigationResult.Fail("H&P: world load failed (corrupt, no backup)");
+
+                // While still in mode=30 (waiting for HostAndPlay to fire), a content reload can wipe
+                // player[0].name to "". Re-apply player+world selection so HostAndPlay fires with
+                // correct data even after the reload completes.
+                if (m == 30)
+                {
+                    string currentName = Main.player[Main.myPlayer]?.name ?? "";
+                    if (currentName != expectedPlayerName)
+                    {
+                        _log.Info($"[MenuNavigator] H&P: content reload detected (name='{currentName}'), re-applying player+world setup");
+                        try { playerData.SetAsActive(); } catch { }
+                        try { worldData.SetAsActive(); } catch { }
+                        Netplay.ServerPassword = "";
+                        Main.autoPass = true;
+                    }
+                }
+
+                Thread.Sleep(250);
+            }
+
+            return NavigationResult.Fail($"H&P: timeout after {timeoutMs}ms (mode={Main.menuMode}, gameMenu={Main.gameMenu})");
+        }
+
+        private bool WaitForMode(int targetMode, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                if (Main.menuMode == targetMode) return true;
+                Thread.Sleep(100);
+            }
+            return false;
+        }
+
         #region Navigation Helpers
 
         private NavigationResult NavigateToSingleplayer()
@@ -461,6 +712,18 @@ namespace DebugTools
             }
         }
 
+        /// <summary>
+        /// Post a raw Enter key to the game window — works in WritingText mode
+        /// (e.g. server password prompt) where trigger injection does not reach.
+        /// </summary>
+        private NavigationResult SubmitTextPrompt()
+        {
+            bool ok = WindowManager.PostEnterKey();
+            if (!ok)
+                return NavigationResult.Fail("Could not obtain game window handle for raw key injection");
+            return NavigationResult.Ok("Submitted text prompt (Enter posted to game window)");
+        }
+
         #endregion
 
         private static string DescribeMenuMode(int mode)
@@ -483,7 +746,9 @@ namespace DebugTools
                 case 16: return "world_size_select";
                 case 200: return "world_load_failed_backup_available";
                 case 201: return "world_load_failed_no_backup";
+                case 30:  return "text_prompt";
                 case 888: return "fancy_ui";
+                case 889: return "hp_world_select";
                 default: return "unknown_" + mode;
             }
         }

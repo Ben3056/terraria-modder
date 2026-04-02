@@ -19,6 +19,7 @@ namespace Randomizer.Modules
         public override bool IsDangerous => true;
 
         internal static SpawnModule Instance;
+        private static MethodInfo _patchedMethod;
 
         // NPCID.Count = 697 in Terraria 1.4.5 (verified from decomp)
         private const int MaxNPCType = 697;
@@ -77,6 +78,26 @@ namespace Randomizer.Modules
             491, 492,      // PirateShip/Cannon
             558, 559, 560, // DD2 Wyverns
 
+            // === Lunar Pillars (boss-tier, spawn pillar enemies) ===
+            422, // LunarTowerVortex
+            493, // LunarTowerStardust
+            507, // LunarTowerNebula
+            517, // LunarTowerSolar
+
+            // === MartianSaucer sub-parts (parent 392 excluded, need these too) ===
+            393, // MartianSaucerTurret
+            394, // MartianSaucerCannon
+            395, // MartianSaucerCore
+
+            // === DD2 special entities (not enemies) ===
+            548, // DD2EterniaCrystal
+            549, // DD2LanePortal
+            551, // DD2Betsy (boss)
+
+            // === Other special/non-combat entities ===
+            437, // CultistTablet
+            488, // TargetDummy
+
             // === Special entities ===
             68,  // DungeonGuardian
             392, // MartianSaucer
@@ -125,7 +146,13 @@ namespace Randomizer.Modules
             683, // TownSlimeYellow
             684, // TownSlimeCopper
 
-            // === Bound town NPCs (should not be randomly spawned) ===
+            // === Bound/rescue NPCs (should not be randomly spawned) ===
+            105, // BoundGoblin
+            106, // BoundWizard
+            123, // BoundMechanic
+            354, // WebbedStylist
+            376, // SleepingAngler
+            579, // BartenderUnconscious
             685, // BoundTownSlimeOld
             686, // BoundTownSlimePurple
             687, // BoundTownSlimeYellow
@@ -171,6 +198,7 @@ namespace Randomizer.Modules
                     var prefix = typeof(SpawnModule).GetMethod(nameof(NewNPC_Prefix),
                         BindingFlags.Public | BindingFlags.Static);
                     harmony.Patch(targetMethod, prefix: new HarmonyMethod(prefix));
+                    _patchedMethod = targetMethod;
                     Log.Info("[Randomizer] Spawns: patched NPC.NewNPC");
                 }
                 else
@@ -190,7 +218,9 @@ namespace Randomizer.Modules
         /// </summary>
         public static void NewNPC_Prefix(object source, ref int Type)
         {
-            if (Instance == null || !Instance.Enabled) return;
+            if (Instance == null || !Instance.Enabled || Instance.ShuffleMap == null) return;
+            // Only shuffle in singleplayer — MP would desync between server and clients
+            if (Main.netMode != 0) return;
             if (Type <= 0 || Type >= MaxNPCType) return;
 
             // Don't shuffle excluded types (bosses, town NPCs, multi-part entities)
@@ -222,7 +252,11 @@ namespace Randomizer.Modules
 
         public override void RemovePatches(Harmony harmony)
         {
-            // Handled by harmony.UnpatchAll
+            if (_patchedMethod != null)
+            {
+                harmony.Unpatch(_patchedMethod, HarmonyPatchType.Prefix, "com.terrariamodder.randomizer");
+                _patchedMethod = null;
+            }
         }
     }
 }

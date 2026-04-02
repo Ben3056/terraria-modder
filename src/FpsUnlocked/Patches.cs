@@ -219,25 +219,25 @@ namespace FpsUnlocked
                 // Deactivation transition
                 else if (!shouldOverride && _wasOverriding)
                 {
-                    // Restore vanilla settings
                     Main.FrameSkipMode = _savedFrameSkipMode;
+                    _wasOverriding = false;
+                    _wasInterpolating = false;
+                    _firstKeyframeCaptured = false;
+                    FrameState.Reset();
+                    _log?.Info("FPS override deactivated, restoring 60fps");
+                }
 
+                if (!shouldOverride)
+                {
+                    // Enforce 60fps every frame in VSync mode or when disabled.
+                    // On >60hz displays, vanilla Terraria's XNA loop runs at the display
+                    // refresh rate — we must explicitly cap it here with IsFixedTimeStep.
                     SetVSync(true);
-
-                    // Restore vanilla timing
                     ReflectionCache.IsFixedTimeStepProp?.SetValue(__instance, true, null);
                     ReflectionCache.TargetElapsedTimeProp?.SetValue(__instance,
                         TimeSpan.FromSeconds(_targetFrameTime), null);
-
-                    _wasOverriding = false;
-                    _vsyncCurrent = true; // back to vanilla
-                    _firstKeyframeCaptured = false;
-                    FrameState.Reset();
-                    _log?.Info("FPS override deactivated, restored vanilla settings");
                     return;
                 }
-
-                if (!shouldOverride) return;
 
                 // --- Apply overrides every frame ---
 
@@ -270,7 +270,7 @@ namespace FpsUnlocked
                 }
                 _wasInterpolating = interpolating;
             }
-            catch { }
+            catch (Exception ex) { _log?.Debug($"[FpsUnlocked] Initialize_Postfix: {ex}"); }
         }
 
         private static void SetVSync(bool enabled)
@@ -297,7 +297,7 @@ namespace FpsUnlocked
                 _skipNextDraw = true;
                 _log?.Info($"VSync changed to {enabled}, skipping next draw for device reset");
             }
-            catch { }
+            catch (Exception ex) { _log?.Debug($"[FpsUnlocked] SetVSync: {ex}"); }
         }
 
         #endregion
@@ -316,7 +316,7 @@ namespace FpsUnlocked
                 // (XNA's IsFixedTimeStep has ~7fps overshoot due to timer granularity)
                 if (Mod.Enabled && Mod.Mode == "Capped" && !Main.gameMenu)
                 {
-                    double targetMs = 1000.0 / Mod.MaxFps;
+                    double targetMs = 1000.0 / Math.Max(1, Mod.MaxFps);
                     double elapsed = _frameLimiter.Elapsed.TotalMilliseconds;
                     if (elapsed < targetMs)
                     {
@@ -334,7 +334,7 @@ namespace FpsUnlocked
 
                 _accumulatorBeforeUpdate = Main.UpdateTimeAccumulator;
             }
-            catch { }
+            catch (Exception ex) { _log?.Debug($"[FpsUnlocked] DoUpdate_Prefix: {ex}"); }
         }
 
         #endregion
@@ -409,7 +409,7 @@ namespace FpsUnlocked
                     _diagFullTickCount = 0;
                 }
             }
-            catch { }
+            catch (Exception ex) { _log?.Debug($"[FpsUnlocked] DoUpdate_Postfix: {ex}"); }
         }
 
         #endregion
@@ -439,7 +439,7 @@ namespace FpsUnlocked
                 Interpolator.ApplyAll();
                 PollMouse();
             }
-            catch { }
+            catch (Exception ex) { _log?.Debug($"[FpsUnlocked] DoDraw_Prefix: {ex}"); }
             return true;
         }
 

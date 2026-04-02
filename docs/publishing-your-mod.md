@@ -34,22 +34,25 @@ Before releasing:
   "description": "Clear description of what your mod does",
   "author": "Your Name",
   "entry_dll": "YourMod.dll",
-  "framework_version": ">=0.2.0",
+  "framework_version": ">=0.4.0",
+  "multiplayer": "client-only",
   "icon": "icon.png",
-  "config_schema": {
-    "enabled": { "type": "bool", "default": true, "label": "Enable Mod" }
-  },
   "keybinds": []
 }
 ```
 
 Required fields:
-- `id` - Unique identifier (lowercase, hyphens)
+- `id` - Unique identifier (lowercase, hyphens only)
 - `name` - Display name
 - `version` - Semantic version (major.minor.patch)
 - `author` - Your name
 - `description` - What the mod does
-- `entry_dll` - Your compiled DLL filename (if omitted, inferred from id with hyphens removed)
+- `entry_dll` - Your compiled DLL filename (if omitted, inferred from id)
+
+Optional but recommended:
+- `multiplayer` - `"required"` (all players need it), `"optional"` (server has it, clients can join without), or `"client-only"` (no server impact). Mods with custom items are automatically `required`.
+- `framework_version` - Minimum Core version (e.g., `">=0.4.0"`)
+- `icon` - Path to icon.png (displayed in mod menu)
 
 ### 4. Choose a License
 

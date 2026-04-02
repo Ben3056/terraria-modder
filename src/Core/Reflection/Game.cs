@@ -28,7 +28,7 @@ namespace TerrariaModder.Core.Reflection
         public static bool IsMultiplayer => Main.netMode != 0;
 
         /// <summary>True if this is the server.</summary>
-        public static bool IsServer => Main.netMode == 2;
+        public static bool IsServer => Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1";
 
         /// <summary>True if this is a client.</summary>
         public static bool IsClient => Main.netMode == 1;
