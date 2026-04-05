@@ -270,6 +270,7 @@ namespace SeedLab
             {
                 bool allOn = true;
                 bool allOff = true;
+                bool worldOriginal = _worldOriginalFlags.TryGetValue(seed.FlagField, out var orig) && orig;
 
                 foreach (var group in seed.Groups)
                 {
@@ -282,20 +283,28 @@ namespace SeedLab
                     }
                 }
 
+                // If all features match the world's original state, don't touch the flag.
+                // This prevents SeedLab from interfering with seeds it doesn't know about
+                // (e.g. "Purify This") that share the same underlying flags.
+                if ((allOn && worldOriginal) || (allOff && !worldOriginal))
+                {
+                    // Feature states match world original — leave flag as-is
+                    continue;
+                }
+
                 if (allOn)
                 {
-                    // Full seed enabled — set global flag, covers ALL check sites in the game
+                    // User enabled all features for a seed the world didn't have
                     SetFlag(seed.FlagField, true);
                 }
                 else if (allOff)
                 {
-                    // Full seed disabled — clear global flag
+                    // User disabled all features for a seed the world had
                     SetFlag(seed.FlagField, false);
                 }
                 else
                 {
                     // Mixed — restore world original, per-method prefixes handle the rest
-                    bool worldOriginal = _worldOriginalFlags.TryGetValue(seed.FlagField, out var orig) && orig;
                     SetFlag(seed.FlagField, worldOriginal);
                     _mixedFlags.Add(seed.FlagField);
                 }
