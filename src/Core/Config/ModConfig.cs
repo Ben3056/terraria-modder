@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using TerrariaModder.Core.Logging;
 
@@ -131,6 +132,15 @@ namespace TerrariaModder.Core.Config
                     Options = prop.GetCustomAttribute<OptionsAttribute>()?.Values
                 };
 
+                // Resolve the provider once when metadata is built, but invoke it later
+                // whenever the UI or APIs need the current option list. This keeps the
+                // reflection cost low without freezing dynamic values at startup.
+                var optionProvider = prop.GetCustomAttribute<OptionProviderAttribute>();
+                if (optionProvider != null)
+                {
+                    meta.OptionsProvider = BuildOptionsProvider(prop, optionProvider);
+                }
+
                 // Scope: explicit [Server] or [Client]; untagged defaults to Client
                 if (prop.GetCustomAttribute<ServerAttribute>() != null)
                     meta.Scope = ConfigScope.Server;
@@ -148,6 +158,54 @@ namespace TerrariaModder.Core.Config
             }
 
             return result.AsReadOnly();
+        }
+
+        private Func<ModConfig, string[]> BuildOptionsProvider(PropertyInfo prop, OptionProviderAttribute attr)
+        {
+            if (prop.PropertyType != typeof(string))
+            {
+                Log?.Warn($"[{ModId}] [OptionProvider] Property '{prop.Name}' must be a string to use dynamic options.");
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(attr.MethodName))
+            {
+                Log?.Warn($"[{ModId}] [OptionProvider] Property '{prop.Name}' is missing a provider method name.");
+                return null;
+            }
+
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+            var method = GetType().GetMethod(attr.MethodName, flags, null, Type.EmptyTypes, null);
+            if (method == null)
+            {
+                Log?.Warn($"[{ModId}] [OptionProvider] Method '{attr.MethodName}' was not found for property '{prop.Name}'.");
+                return null;
+            }
+
+            if (!typeof(IEnumerable<string>).IsAssignableFrom(method.ReturnType))
+            {
+                Log?.Warn($"[{ModId}] [OptionProvider] Method '{attr.MethodName}' for property '{prop.Name}' must return IEnumerable<string>.");
+                return null;
+            }
+
+            return config =>
+            {
+                try
+                {
+                    object target = method.IsStatic ? null : config;
+                    var result = method.Invoke(target, null) as IEnumerable<string>;
+
+                    // Normalize provider output so every caller gets the same contract:
+                    // no null/blank values and no duplicates that would create noisy or
+                    // ambiguous selector entries in the config UI.
+                    return result?.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToArray() ?? Array.Empty<string>();
+                }
+                catch (Exception ex)
+                {
+                    Log?.Warn($"[{ModId}] [OptionProvider] Method '{attr.MethodName}' for property '{prop.Name}' failed: {ex.Message}");
+                    return Array.Empty<string>();
+                }
+            };
         }
 
         // Called by ConfigManager to apply migrated raw values.

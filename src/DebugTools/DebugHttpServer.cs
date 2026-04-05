@@ -2322,10 +2322,13 @@ namespace DebugTools
 
                 if (meta.Min.HasValue) pairs.Add(JsonPair("min", meta.Min.Value));
                 if (meta.Max.HasValue) pairs.Add(JsonPair("max", meta.Max.Value));
-                if (meta.Options != null && meta.Options.Length > 0)
+                // Export the resolved option list, not just the static [Options] values,
+                // so external tooling sees the same dynamic selector choices as the UI.
+                var options = meta.GetOptions(config);
+                if (options.Length > 0)
                 {
                     var opts = new List<string>();
-                    foreach (var opt in meta.Options)
+                    foreach (var opt in options)
                         opts.Add($"\"{EscapeJson(opt)}\"");
                     pairs.Add(JsonArray("options", opts));
                 }
@@ -2364,16 +2367,18 @@ namespace DebugTools
                 if (!raw.TryGetValue("value", out object rawValue))
                     return JsonObject(JsonPair("success", false), JsonPair("error", "Missing 'value' field"));
 
-                // Validate string Options constraint before setting
-                if (target.Options != null && target.Options.Length > 0 && target.PropertyType == typeof(string))
+                // Validate against the resolved option list so HTTP config writes obey
+                // both static [Options] and runtime-provided choices.
+                var options = target.GetOptions(config);
+                if (options.Length > 0 && target.PropertyType == typeof(string))
                 {
                     string strVal = rawValue?.ToString() ?? "";
                     bool found = false;
-                    foreach (var opt in target.Options)
+                    foreach (var opt in options)
                         if (opt == strVal) { found = true; break; }
                     if (!found)
                         return JsonObject(JsonPair("success", false),
-                            JsonPair("error", $"Value '{strVal}' is not a valid option for '{propName}'. Allowed: {string.Join(", ", target.Options)}"));
+                            JsonPair("error", $"Value '{strVal}' is not a valid option for '{propName}'. Allowed: {string.Join(", ", options)}"));
                 }
 
                 // Check scope mismatch (set in memory but warn about persistence)

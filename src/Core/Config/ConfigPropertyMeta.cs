@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 
 namespace TerrariaModder.Core.Config
@@ -45,6 +46,13 @@ namespace TerrariaModder.Core.Config
         /// <summary>Allowed options for [Options] string fields.</summary>
         public string[] Options { get; internal set; }
 
+        /// <summary>
+        /// Optional provider for dynamic string options.
+        /// When present, callers should prefer <see cref="GetOptions"/> over reading
+        /// <see cref="Options"/> directly so late-bound values stay up to date.
+        /// </summary>
+        internal Func<ModConfig, string[]> OptionsProvider { get; set; }
+
         /// <summary>Legacy names mapped to this property (from [FormerlySerializedAs]).</summary>
         public string[] FormerNames { get; internal set; }
 
@@ -53,6 +61,21 @@ namespace TerrariaModder.Core.Config
 
         /// <summary>Get the current value from a config instance.</summary>
         public object GetValue(ModConfig config) => Property.GetValue(config);
+
+        /// <summary>
+        /// Get allowed options for this property.
+        /// Returns a fresh array when backed by a dynamic provider so callers see
+        /// the latest runtime state instead of a startup-time snapshot.
+        /// </summary>
+        public string[] GetOptions(ModConfig config)
+        {
+            if (OptionsProvider != null)
+            {
+                return OptionsProvider(config) ?? Array.Empty<string>();
+            }
+
+            return Options ?? Array.Empty<string>();
+        }
 
         /// <summary>Set a value on a config instance (clamps numerics to range).</summary>
         public void SetValue(ModConfig config, object value)

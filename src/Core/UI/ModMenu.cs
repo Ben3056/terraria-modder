@@ -785,7 +785,10 @@ namespace TerrariaModder.Core.UI
             {
                 DrawFloatField(valueX, y, valueWidth, currentValue, meta, config, modId);
             }
-            else if (t == typeof(string) && meta.Options != null && meta.Options.Length > 0)
+            // String fields with either static [Options] or a runtime option provider
+            // render as left/right selectors. We query on demand so mods can surface
+            // values discovered after initial config metadata construction.
+            else if (t == typeof(string) && meta.GetOptions(config).Length > 0)
             {
                 DrawEnumField(valueX, y, valueWidth, currentValue, meta, config, modId);
             }
@@ -1011,7 +1014,9 @@ namespace TerrariaModder.Core.UI
         private static void DrawEnumField(int x, int y, int width, object value, Config.ConfigPropertyMeta meta, Config.ModConfig config, string modId)
         {
             string currentVal = value?.ToString() ?? "";
-            var options = meta.Options != null ? new List<string>(meta.Options) : new List<string>();
+            // Re-fetch options each frame so a selector can reflect live registries or
+            // lazily loaded content without needing the config screen to be rebuilt.
+            var options = new List<string>(meta.GetOptions(config));
             int currentIndex = options.IndexOf(currentVal);
             if (currentIndex < 0) currentIndex = 0;
 
