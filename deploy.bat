@@ -78,13 +78,19 @@ for /d %%d in (src\*) do (
     set "MOD_NAME=%%~nxd"
     if /i not "!MOD_NAME!"=="Core" (
         if exist "src\!MOD_NAME!\manifest.json" (
-            REM Read mod-id from manifest.json
+            REM Read mod-id from manifest.json (first "id" line only — skip keybind ids)
             set "MOD_ID="
-            for /f "tokens=2 delims=:," %%a in ('findstr /C:"\"id\"" "src\!MOD_NAME!\manifest.json"') do (
-                set "MOD_ID=%%~a"
-                REM Strip quotes and spaces
-                set "MOD_ID=!MOD_ID: =!"
-                set "MOD_ID=!MOD_ID:"=!"
+            for /f "usebackq delims=" %%L in ("src\!MOD_NAME!\manifest.json") do (
+                if "!MOD_ID!"=="" (
+                    echo %%L | findstr /C:"\"id\"" >nul 2>&1
+                    if not errorlevel 1 (
+                        for /f "tokens=2 delims=:," %%a in ("%%L") do (
+                            set "MOD_ID=%%~a"
+                            set "MOD_ID=!MOD_ID: =!"
+                            set "MOD_ID=!MOD_ID:"=!"
+                        )
+                    )
+                )
             )
 
             if not "!MOD_ID!"=="" (
