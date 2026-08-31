@@ -183,7 +183,7 @@ namespace TerrariaModder.Core.Server
         {
             if (!_isDedServ)
             {
-                try { Terraria.Item.NewItem(null, pos, width, height, itemId, stack, false, prefix); return; } catch { }
+                try { Terraria.Item.NewItem(null, (int)pos.X, (int)pos.Y, width, height, itemId, stack, false, prefix); return; } catch { }
             }
             try
             {
