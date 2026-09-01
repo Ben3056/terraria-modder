@@ -420,38 +420,22 @@ namespace TerrariaModder.Core.Net
                 return;
             }
 
+            // payload: "topX,topY,capacity"
             var parts = payload?.Split(',');
-            if (parts == null || parts.Length != 2 || !int.TryParse(parts[0], out int topX) || !int.TryParse(parts[1], out int topY))
+            if (
+                parts == null ||
+                parts.Length != 3 ||
+                !int.TryParse(parts[0], out int topX) ||
+                !int.TryParse(parts[1], out int topY) ||
+                !int.TryParse(parts[2], out int capacity)
+            )
             {
                 NetSync.SendServerCommandResponseTo(callerSlot, "paintingchest_configure", "failed:badpayload");
                 return;
             }
 
             // Find the chest that vanilla already created at this position
-            int chestIdx = -1;
-            try
-            {
-                chestIdx = Terraria.Chest.FindChest(topX, topY);
-            }
-            catch
-            {
-                // On ded server, use DedServProxy to find chest
-                try
-                {
-                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                    {
-                        if (asm.GetName().Name != "TerrariaServer") continue;
-                        var chestType = asm.GetType("Terraria.Chest");
-                        var findMethod = chestType?.GetMethod("FindChest",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
-                            null, new[] { typeof(int), typeof(int) }, null);
-                        if (findMethod != null)
-                            chestIdx = (int)findMethod.Invoke(null, new object[] { topX, topY });
-                        break;
-                    }
-                }
-                catch { }
-            }
+            int chestIdx = DedServProxy.FindChest(topX, topY);
 
             if (chestIdx < 0)
             {
@@ -460,37 +444,16 @@ namespace TerrariaModder.Core.Net
                 return;
             }
 
-            // Configure: set name + resize
-            try
+            // Configure the live chest in the TerrariaServer assembly.
+            if (!DedServProxy.ConfigureChest(chestIdx, "Mysterious Chest", capacity))
             {
-                if (Environment.GetEnvironmentVariable("TERRARIA_MODDER_DEDSERV") == "1")
-                {
-                    // On ded server, access chest array via reflection through TerrariaServer assembly
-                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                    {
-                        if (asm.GetName().Name != "TerrariaServer") continue;
-                        var mainType = asm.GetType("Terraria.Main");
-                        var chestArr = mainType?.GetField("chest", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null) as Array;
-                        if (chestArr != null && chestIdx >= 0 && chestIdx < chestArr.Length)
-                        {
-                            var chest = chestArr.GetValue(chestIdx);
-                            if (chest != null)
-                                chest.GetType().GetField("name", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)?.SetValue(chest, "Mysterious Chest");
-                        }
-                        break;
-                    }
-                }
-                else
-                {
-                    var chest = Terraria.Main.chest[chestIdx];
-                    if (chest != null)
-                        chest.name = "Mysterious Chest";
-                }
+                _log?.Warn($"[ServerCommand] PaintingChestConfigure: resize failed for idx={chestIdx} capacity={capacity}");
+                NetSync.SendServerCommandResponseTo(callerSlot, "paintingchest_configure", "failed:resize");
+                return;
             }
-            catch { }
 
-            _log?.Info($"[ServerCommand] PaintingChestConfigure: idx={chestIdx} at ({topX},{topY}) requested by slot {callerSlot}");
-            NetSync.BroadcastServerCommandResponse("paintingchest_configured", $"{topX},{topY}");
+            _log?.Info($"[ServerCommand] PaintingChestConfigure: idx={chestIdx} at ({topX},{topY}) capacity={capacity} requested by slot {callerSlot}");
+            NetSync.BroadcastServerCommandResponse("paintingchest_configured", $"{topX},{topY},{capacity}");
         }
     }
 }
