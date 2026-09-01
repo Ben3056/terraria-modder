@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using Terraria;
 using TerrariaModder.Core;
 using TerrariaModder.Core.Assets;
 using TerrariaModder.Core.Logging;
+using TerrariaModder.Core.Net;
 using TerrariaModder.Core.UI;
 using StorageHub.Config;
 
@@ -30,6 +32,8 @@ namespace StorageHub.PaintingChest
 
         private static ILogger _log;
         private static StorageHubConfig _config;
+        private static readonly HashSet<string> _serverConfiguredChests = new HashSet<string>();
+        private static int _lastRequestedCapacity = -1;
 
         /// <summary>Get the current world's storage folder path (for migration sidecars).</summary>
         public static string GetWorldFolder() => _config?.GetWorldFolder();
@@ -109,6 +113,7 @@ namespace StorageHub.PaintingChest
             {
                 _nameEnforceTimer = 0;
                 EnforceChestNames();
+                RequestServerResizeAll(GetCurrentCapacity());
             }
         }
 
@@ -136,6 +141,8 @@ namespace StorageHub.PaintingChest
         public static void OnWorldLoad(StorageHubConfig config)
         {
             _config = config;
+            _serverConfiguredChests.Clear();
+            _lastRequestedCapacity = -1;
 
             // Migrate legacy painting tiles (type 246 style 37) — extracts chest contents
             // to a sidecar file before removing tiles. Contents are restored when user
@@ -233,6 +240,8 @@ namespace StorageHub.PaintingChest
             UIRenderer.UnregisterPanelDraw("painting-chest-label");
             Enabled = false;
             _config = null;
+            _serverConfiguredChests.Clear();
+            _lastRequestedCapacity = -1;
         }
 
         public static int GetCurrentCapacity()
@@ -240,6 +249,63 @@ namespace StorageHub.PaintingChest
             int level = _config?.PaintingChestLevel ?? 0;
             return PaintingChestProgression.GetCapacity(level);
         }
+
+        /// <summary>
+        /// Ask the authoritative multiplayer server to resize every synchronized Mysterious Chest.
+        /// Requests are retried until the server acknowledges each coordinate.
+        /// </summary>
+        public static void RequestServerResizeAll(int capacity)
+        {
+            if (Main.netMode != 1) return;
+            if (!NetSync.LocalPlayerIsAdmin) return;
+
+            if (_lastRequestedCapacity != capacity)
+            {
+                _serverConfiguredChests.Clear();
+                _lastRequestedCapacity = capacity;
+            }
+
+            try
+            {
+                for (int i = 0; i < Main.maxChests; i++)
+                {
+                    var chest = Main.chest[i];
+                    if (chest == null) continue;
+
+                    var tile = Main.tile[chest.x, chest.y];
+                    if (tile == null || !tile.active() || tile.type != TILE_TYPE) continue;
+                    if (tile.frameX / 36 != OUR_PLACE_STYLE) continue;
+
+                    string key = GetServerConfigurationKey(chest.x, chest.y, capacity);
+                    if (_serverConfiguredChests.Contains(key)) continue;
+
+                    NetSync.SendServerCommandRequest("paintingchest_configure",
+                        $"{chest.x},{chest.y},{capacity}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log?.Debug($"RequestServerResizeAll failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Apply and remember a capacity acknowledged by the server.</summary>
+        public static void ApplyServerConfiguration(int topX, int topY, int capacity)
+        {
+            int chestIndex = Chest.FindChest(topX, topY);
+            if (chestIndex < 0) return;
+
+            var chest = Main.chest[chestIndex];
+            if (chest == null) return;
+
+            chest.Resize(capacity);
+            chest.name = CHEST_NAME;
+            _serverConfiguredChests.Add(GetServerConfigurationKey(topX, topY, capacity));
+            _log?.Info($"[Chest] Server confirmed idx={chestIndex} at ({topX},{topY}) maxItems={chest.maxItems}");
+        }
+
+        private static string GetServerConfigurationKey(int x, int y, int capacity)
+            => $"{x},{y},{capacity}";
 
         private static void Draw()
         {

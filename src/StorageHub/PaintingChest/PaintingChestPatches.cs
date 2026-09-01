@@ -133,29 +133,30 @@ namespace StorageHub.PaintingChest
             if (type != "paintingchest_created" && type != "paintingchest_configured") return;
 
             var parts = result.Split(',');
-            if (parts.Length < 2) return;
-
             try
             {
-                int topX, topY;
-                if (type == "paintingchest_created" && parts.Length >= 3)
+                if (type == "paintingchest_configured")
                 {
-                    // Legacy: slot,x,y — create chest locally
-                    if (!int.TryParse(parts[0], out int slot) ||
-                        !int.TryParse(parts[1], out topX) ||
-                        !int.TryParse(parts[2], out topY)) return;
-                    int idx = Chest.CreateChest(topX, topY, slot);
-                    _log?.Info($"[Chest] Legacy: created chest slot={slot} idx={idx} at ({topX},{topY})");
-                    if (idx < 0) return;
-                }
-                else
-                {
-                    // New: x,y — find existing chest and configure
-                    if (!int.TryParse(parts[0], out topX) ||
-                        !int.TryParse(parts[1], out topY)) return;
+                    if (parts.Length != 3 ||
+                        !int.TryParse(parts[0], out int configuredX) ||
+                        !int.TryParse(parts[1], out int configuredY) ||
+                        !int.TryParse(parts[2], out int configuredCapacity)) return;
+
+                    PaintingChestManager.ApplyServerConfiguration(
+                        configuredX, configuredY, configuredCapacity);
+                    return;
                 }
 
-                // Find and configure the chest (may already exist from vanilla sync)
+                if (parts.Length < 3 ||
+                    !int.TryParse(parts[0], out int slot) ||
+                    !int.TryParse(parts[1], out int topX) ||
+                    !int.TryParse(parts[2], out int topY)) return;
+
+                // Legacy: slot,x,y — create and configure the chest locally.
+                int idx = Chest.CreateChest(topX, topY, slot);
+                _log?.Info($"[Chest] Legacy: created chest slot={slot} idx={idx} at ({topX},{topY})");
+                if (idx < 0) return;
+
                 int chestIdx = Chest.FindChest(topX, topY);
                 if (chestIdx < 0)
                 {
@@ -443,7 +444,8 @@ namespace StorageHub.PaintingChest
                 if (ourItemType > 0)
                 {
                     Item.NewItem(WorldGen.GetItemSource_FromTileBreak(i, j),
-                        i * 16, j * 16, 32, 32, ourItemType);
+                        new Microsoft.Xna.Framework.Vector2(i * 16 + 16, j * 16 + 16),
+                        ourItemType);
                 }
 
                 WorldGen.destroyObject = false;
