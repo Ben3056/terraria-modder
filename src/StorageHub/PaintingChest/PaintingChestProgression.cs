@@ -10,6 +10,8 @@ namespace StorageHub.PaintingChest
     /// </summary>
     public static class PaintingChestProgression
     {
+        public const int BaseCapacity = 40;
+
         public class CapacityTier
         {
             public int TargetLevel { get; set; }
@@ -28,15 +30,15 @@ namespace StorageHub.PaintingChest
 
         public static int GetCapacity(int level)
         {
-            switch (level)
+            if (level == 0) return BaseCapacity;
+
+            for (int i = 0; i < Tiers.Length; i++)
             {
-                case 0: return 40;
-                case 1: return 80;
-                case 2: return 200;
-                case 3: return 1000;
-                case 4: return 5000;
-                default: return 40;
+                if (Tiers[i].TargetLevel == level)
+                    return Tiers[i].Capacity;
             }
+
+            return BaseCapacity;
         }
 
         public static CapacityTier GetNextTier(int currentLevel)

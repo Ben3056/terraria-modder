@@ -537,7 +537,10 @@ namespace StorageHub.UI.Tabs
                         _config.PaintingChestLevel = nextTier.TargetLevel;
                         _config.Save();
                         int newCapacity = PaintingChestProgression.GetCapacity(nextTier.TargetLevel);
-                        PaintingChestManager.ResizeAllPaintingChests(newCapacity);
+                        if (Main.netMode == 1)
+                            PaintingChestManager.RequestServerResizeAll(newCapacity);
+                        else
+                            PaintingChestManager.ResizeAllPaintingChests(newCapacity);
                         _log.Info($"Painting chest upgraded to level {nextTier.TargetLevel} ({newCapacity} slots)");
                         _needsRefresh = true;
                         OnStorageModified?.Invoke();

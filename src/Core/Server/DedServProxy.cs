@@ -125,6 +125,63 @@ namespace TerrariaModder.Core.Server
             return chests[index];
         }
 
+        /// <summary>Find a chest index by its top-left tile coordinates.</summary>
+        public static int FindChest(int x, int y)
+        {
+            if (!_isDedServ)
+            {
+                try { return Terraria.Chest.FindChest(x, y); } catch { return -1; }
+            }
+
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (asm.GetName().Name != "TerrariaServer") continue;
+                    var chestType = asm.GetType("Terraria.Chest");
+                    var findChest = chestType?.GetMethod("FindChest",
+                        BindingFlags.Public | BindingFlags.Static, null,
+                        new[] { typeof(int), typeof(int) }, null);
+                    return findChest != null
+                        ? (int)findChest.Invoke(null, new object[] { x, y })
+                        : -1;
+                }
+            }
+            catch (Exception ex) { _log?.Warn($"[DedServProxy] FindChest({x},{y}) failed: {ex.Message}"); }
+            return -1;
+        }
+
+        /// <summary>Resize and name a chest using the assembly that owns the live chest.</summary>
+        public static bool ConfigureChest(int chestIndex, string name, int capacity)
+        {
+            if (capacity <= 0) return false;
+
+            try
+            {
+                var chest = GetChest(chestIndex);
+                if (chest == null) return false;
+
+                var chestType = chest.GetType();
+                var resize = chestType.GetMethod("Resize",
+                    BindingFlags.Public | BindingFlags.Instance, null,
+                    new[] { typeof(int) }, null);
+                if (resize == null) return false;
+
+                resize.Invoke(chest, new object[] { capacity });
+
+                var nameField = chestType.GetField("name", BindingFlags.Public | BindingFlags.Instance);
+                nameField?.SetValue(chest, name ?? string.Empty);
+
+                var items = GetChestItems(chest);
+                return items != null && items.Length == capacity;
+            }
+            catch (Exception ex)
+            {
+                _log?.Warn($"[DedServProxy] ConfigureChest({chestIndex},{capacity}) failed: {ex.Message}");
+                return false;
+            }
+        }
+
         // ── Item slot access ────────────────────────────────────────────────────
 
         public static int GetItemType(object item) => GetField<int>(item, "type");
